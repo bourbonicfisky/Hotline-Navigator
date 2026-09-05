@@ -197,6 +197,7 @@ pub const ACCESS_SEND_MEDIA: u64 = access_bit(57); // AccessSendMedia (inline me
 // HTXF transfer flags
 pub const HTXF_FLAG_LARGE_FILE: u32 = 0x00000001;
 pub const HTXF_FLAG_SIZE64: u32 = 0x00000002;
+pub const HTXF_FLAG_RESUME: u32 = 0x00000004;
 
 // Transaction types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,6 +371,7 @@ pub enum FieldType {
     FileNameWithInfo = 200,
     FileName = 201,
     FilePath = 202,
+    FileResumeData = 203,
     FileTransferOptions = 204,
     FileTypeString = 205,
     FileCreatorString = 206,
@@ -405,6 +407,7 @@ pub enum FieldType {
     // Large file extension fields
     Capabilities = 496,       // 0x01F0
     FileSize64 = 497,         // 0x01F1
+    PartialDigest = 506,
     Offset64 = 498,           // 0x01F2
     TransferSize64 = 499,     // 0x01F3
     FolderItemCount64 = 500,  // 0x01F4
@@ -485,6 +488,7 @@ impl From<u16> for FieldType {
             200 => Self::FileNameWithInfo,
             201 => Self::FileName,
             202 => Self::FilePath,
+            203 => Self::FileResumeData,
             204 => Self::FileTransferOptions,
             205 => Self::FileTypeString,
             206 => Self::FileCreatorString,
@@ -519,6 +523,7 @@ impl From<u16> for FieldType {
             337 => Self::NewsArticleRecursiveDelete,
             496 => Self::Capabilities,
             497 => Self::FileSize64,
+            506 => Self::PartialDigest,
             498 => Self::Offset64,
             499 => Self::TransferSize64,
             500 => Self::FolderItemCount64,

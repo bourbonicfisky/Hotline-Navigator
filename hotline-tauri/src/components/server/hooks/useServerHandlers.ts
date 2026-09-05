@@ -166,14 +166,14 @@ export function useServerHandlers({
     }
   };
 
-  const handleDownloadFile = async (fileName: string, fileSize: number) => {
+  const handleDownloadFile = async (fileName: string, fileSize: number, isFolder = false, sourcePath = currentPath) => {
     log('Transfer', `Download initiated: ${fileName}`, { fileSize, path: currentPath });
     try {
       setDownloadProgress((prev) => new Map(prev).set(fileName, 0));
 
-      const result = await invoke<string>('download_file', {
+      const result = await invoke<string>(isFolder ? 'download_folder' : 'download_file', {
         serverId,
-        path: currentPath,
+        path: sourcePath,
         fileName,
         fileSize,
         downloadFolder: downloadFolder ?? null,

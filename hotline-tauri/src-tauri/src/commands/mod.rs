@@ -280,6 +280,23 @@ pub async fn download_file(
     state.download_file(&server_id, path, file_name, file_size, download_folder).await
 }
 
+#[tauri::command]
+pub async fn download_folder(server_id: String, path: Vec<String>, file_name: String, download_folder: Option<String>, state: State<'_, AppState>) -> Result<String, String> {
+    state.download_folder(&server_id, path, file_name, download_folder).await
+}
+
+#[tauri::command]
+pub async fn upload_folder(server_id: String, path: Vec<String>, state: State<'_, AppState>) -> Result<bool, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    { let _ = (server_id, path, state); Err("Folder upload is available on desktop".into()) }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let root = tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_title("Choose Folder to Upload").pick_folder())
+            .await.map_err(|e| e.to_string())?;
+        if let Some(root) = root { state.upload_folder(&server_id, path, root).await?; Ok(true) } else { Ok(false) }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PickedImage {

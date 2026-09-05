@@ -1,3 +1,5 @@
+mod downloads;
+
 // Application state management
 
 use crate::protocol::{types::Bookmark, HotlineClient};
@@ -761,54 +763,8 @@ impl AppState {
         }
     }
 
-    pub async fn download_file(&self, server_id: &str, path: Vec<String>, file_name: String, file_size: u64, download_folder: Option<String>) -> Result<String, String> {
-        let clients = self.clients.read().await;
-
-        if let Some(client) = clients.get(server_id) {
-            // Get reference number from server and server-reported file size
-            let (reference_number, server_file_size) = client.download_file(path, file_name.clone()).await?;
-
-            println!("Got reference number {}, starting file transfer...", reference_number);
-            if let Some(server_size) = server_file_size {
-                println!("Server reports file size: {} bytes ({:.2} MB)", server_size, server_size as f64 / 1_000_000.0);
-            }
-
-            // Prefer server-reported file size over file list size, but fall back to file list size if server reports 0
-            let effective_file_size = if let Some(server_size) = server_file_size {
-                if server_size > 0 {
-                    server_size
-                } else {
-                    println!("Server reported file size is 0, using file list size: {} bytes", file_size);
-                    file_size
-                }
-            } else {
-                println!("Server did not report file size, using file list size: {} bytes", file_size);
-                file_size
-            };
-
-            // Perform the file transfer with progress callback
-            let app_handle = self.app_handle.clone();
-            let server_id_clone = server_id.to_string();
-            let file_name_clone = file_name.clone();
-            let file_data = client.perform_file_transfer(
-                reference_number,
-                effective_file_size,
-                move |bytes_read, total_bytes| {
-                    let progress = (bytes_read as f64 / total_bytes as f64 * 100.0) as u32;
-                    let payload = serde_json::json!({
-                        "fileName": file_name_clone,
-                        "bytesRead": bytes_read,
-                        "totalBytes": total_bytes,
-                        "progress": progress,
-                    });
-                    let _ = app_handle.emit(&format!("download-progress-{}", server_id_clone), payload);
-                }
-            ).await?;
-
-            println!("File transfer complete, {} bytes received", file_data.len());
-
-            // Get downloads directory: use user preference if set, otherwise fall back to system default
-            let downloads_dir = if let Some(ref folder) = download_folder {
+    fn download_directory(&self, download_folder: Option<String>) -> Result<PathBuf, String> {
+        Ok(if let Some(ref folder) = download_folder {
                 std::path::PathBuf::from(folder)
             } else if cfg!(target_os = "ios") {
                 self.app_handle
@@ -849,7 +805,54 @@ impl AppState {
                             .map(|dir| dir.join("Downloads"))
                     })
                     .map_err(|e| format!("Failed to get downloads directory: {}", e))?
-            };
+            })
+    }
+
+    pub async fn download_folder(&self, server_id: &str, path: Vec<String>, name: String, destination: Option<String>) -> Result<String, String> {
+        let clients = self.clients.read().await;
+        let client = clients.get(server_id).ok_or("Server not connected")?;
+        let base = self.download_directory(destination)?;
+        tokio::fs::create_dir_all(&base).await.map_err(|e| e.to_string())?;
+        let safe_name: String = name.chars().map(|c| if c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '?' | '*' | '|') { '_' } else { c }).collect();
+        if safe_name.is_empty() || safe_name == "." || safe_name == ".." { return Err("Invalid folder name".into()); }
+        let (reference, _, count) = client.download_folder(path, name.clone()).await?;
+        let mut root = None;
+        for counter in 0..10000 {
+            let candidate = base.join(if counter == 0 { safe_name.clone() } else { format!("{safe_name} ({counter})") });
+            match tokio::fs::create_dir(&candidate).await {
+                Ok(()) => { root = Some(candidate); break; }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        let root = root.ok_or("Cannot find an unused folder name")?;
+        client.receive_folder(reference, count, &root, |done, total| {
+            let progress = if total == 0 { 100 } else { done * 100 / total };
+            let _ = self.app_handle.emit(&format!("download-progress-{server_id}"), serde_json::json!({
+                "fileName": name, "bytesRead": done, "totalBytes": total, "progress": progress,
+            }));
+        }).await.map_err(|e| format!("{e}. Completed files remain in {}", root.display()))?;
+        Ok(format!("Downloaded to: {}", root.display()))
+    }
+
+    pub async fn upload_folder(&self, server_id: &str, path: Vec<String>, root: PathBuf) -> Result<(), String> {
+        let clients = self.clients.read().await;
+        let client = clients.get(server_id).ok_or("Server not connected")?;
+        let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        client.send_folder(path, root, |done, total| {
+            let progress = if total == 0 { 100 } else { done * 100 / total };
+            let _ = self.app_handle.emit(&format!("upload-progress-{server_id}"), serde_json::json!({
+                "fileName": name, "bytesSent": done, "totalBytes": total, "progress": progress,
+            }));
+        }).await
+    }
+
+    pub async fn download_file(&self, server_id: &str, path: Vec<String>, file_name: String, file_size: u64, download_folder: Option<String>) -> Result<String, String> {
+        let clients = self.clients.read().await;
+
+        if let Some(client) = clients.get(server_id) {
+            // Get downloads directory: use user preference if set, otherwise fall back to system default
+            let downloads_dir = self.download_directory(download_folder)?;
 
             // Ensure downloads directory exists
             fs::create_dir_all(&downloads_dir)
@@ -868,36 +871,89 @@ impl AppState {
                 })
                 .collect::<String>();
             
-            // Create full file path, avoiding collisions with existing files
-            let file_path = {
-                let base = downloads_dir.join(&sanitized_name);
-                if !base.exists() {
-                    base
-                } else {
-                    // Split into stem and extension for numbered suffix
-                    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or(&sanitized_name).to_string();
-                    let ext = base.extension().and_then(|s| s.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
-                    let mut counter = 1u32;
-                    loop {
-                        let candidate = downloads_dir.join(format!("{stem} ({counter}){ext}"));
-                        if !candidate.exists() {
-                            break candidate;
-                        }
-                        counter += 1;
-                        if counter > 9999 {
-                            break candidate; // Safety valve
-                        }
+            let sanitized_name = if sanitized_name.is_empty() || sanitized_name == "." || sanitized_name == ".." {
+                "download".to_string()
+            } else { sanitized_name };
+
+            // Bind a retained partial to the remote file's identity and modification date.
+            // Without a date, restart rather than risk appending to a changed file.
+            use sha2::{Digest, Sha256};
+            use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+            let info = client.get_file_info(path.clone(), file_name.clone()).await.ok();
+            let resumable = info.as_ref().and_then(|i| i.modify_date.as_ref()).is_some();
+            let total = info.as_ref().map(|i| i.file_size).unwrap_or(file_size);
+            let identity = serde_json::to_vec(&(client.transfer_identity(), &path, &file_name,
+                total, info.as_ref().and_then(|i| i.modify_date_raw.as_ref()))).map_err(|e| e.to_string())?;
+            let partial_dir = self.app_handle.path().app_data_dir().map_err(|e| e.to_string())?.join("PartialDownloads");
+            tokio::fs::create_dir_all(&partial_dir).await.map_err(|e| e.to_string())?;
+            let partial_path = partial_dir.join(format!("{:x}.part", Sha256::digest(&identity)));
+            let _guard = downloads::DownloadGuard::acquire(partial_path.clone())?;
+            if let Ok(meta) = tokio::fs::symlink_metadata(&partial_path).await {
+                if !meta.is_file() { return Err("Partial download is not a regular file".into()); }
+            }
+            let mut partial = tokio::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+                .open(&partial_path).await.map_err(|e| e.to_string())?;
+            let mut offset = partial.metadata().await.map_err(|e| e.to_string())?.len();
+            if !resumable || offset > total {
+                partial.set_len(0).await.map_err(|e| e.to_string())?;
+                offset = 0;
+            }
+            for attempt in 0..2 {
+                partial.seek(std::io::SeekFrom::Start(offset)).await.map_err(|e| e.to_string())?;
+                let request = client.download_file_at(path.clone(), file_name.clone(), offset).await;
+                let (reference, server_size) = match request {
+                    Ok(value) => value,
+                    Err(_) if offset > 0 && attempt == 0 => {
+                        partial.set_len(0).await.map_err(|e| e.to_string())?;
+                        offset = 0;
+                        continue;
                     }
+                    Err(e) => return Err(e),
+                };
+                let expected = server_size.or_else(|| if total > 0 { Some(total) } else { None });
+                let remaining = expected.map(|size| size.checked_sub(offset).ok_or("Remote file is smaller than the partial"))
+                    .transpose()?;
+                let result = client.receive_file_to_disk(reference, remaining, offset, &mut partial, |read, total| {
+                    let progress = if total > 0 { (read as f64 / total as f64 * 100.0) as u32 } else { 0 };
+                    let _ = self.app_handle.emit(&format!("download-progress-{}", server_id), serde_json::json!({
+                        "fileName": file_name, "bytesRead": read, "totalBytes": total, "progress": progress,
+                    }));
+                }).await;
+                partial.flush().await.map_err(|e| e.to_string())?;
+                match result {
+                    Ok(_) => break,
+                    Err(e) if offset > 0 && attempt == 0 && e.contains("unexpected file size") => {
+                        partial.set_len(0).await.map_err(|e| e.to_string())?;
+                        offset = 0;
+                    }
+                    Err(e) => return Err(format!("{e}. Download again to retry; partial data has been saved.")),
                 }
-            };
+            }
+            partial.sync_all().await.map_err(|e| e.to_string())?;
 
-            println!("Saving file to: {:?} (original name: {:?})", file_path, file_name);
-
-            // Save file to disk
-            fs::write(&file_path, file_data)
-                .map_err(|e| format!("Failed to write file: {}", e))?;
-
-            println!("File saved successfully to {:?}", file_path);
+            // Reserve a new destination atomically, preserving any existing user file.
+            let base = downloads_dir.join(&sanitized_name);
+            let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
+            let ext = base.extension().and_then(|s| s.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+            let mut destination = None;
+            for counter in 0..10000 {
+                let candidate = if counter == 0 { base.clone() } else { downloads_dir.join(format!("{stem} ({counter}){ext}")) };
+                match tokio::fs::OpenOptions::new().write(true).create_new(true).open(&candidate).await {
+                    Ok(file) => { destination = Some((candidate, file)); break; }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            let (file_path, mut output) = destination.ok_or("Cannot find an unused download filename")?;
+            partial.seek(std::io::SeekFrom::Start(0)).await.map_err(|e| e.to_string())?;
+            if let Err(e) = tokio::io::copy(&mut partial, &mut output).await {
+                drop(output);
+                let _ = tokio::fs::remove_file(&file_path).await;
+                return Err(format!("Could not finish saving download: {e}"));
+            }
+            output.sync_all().await.map_err(|e| e.to_string())?;
+            drop(partial);
+            let _ = tokio::fs::remove_file(&partial_path).await;
 
             Ok(format!("Downloaded to: {}", file_path.display()))
         } else {

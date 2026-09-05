@@ -5,7 +5,7 @@ use super::{BoxedRead, BoxedWrite, FileInfo, HotlineClient};
 use super::hope_aead::{TransferReader, TransferWriter, HopeAeadStreamReader, HopeAeadStreamWriter};
 use crate::protocol::constants::{
     FieldType, TransactionType, FILE_TRANSFER_ID,
-    HTXF_FLAG_LARGE_FILE, HTXF_FLAG_SIZE64,
+    HTXF_FLAG_LARGE_FILE, HTXF_FLAG_SIZE64, HTXF_FLAG_RESUME,
     resolve_error_message,
 };
 use crate::protocol::transaction::{Transaction, TransactionField};
@@ -30,8 +30,8 @@ fn encode_file_path(path: &[String], encoding: TextEncoding) -> Option<Vec<u8>> 
 impl HotlineClient {
     /// Create a transfer connection (plain TCP or TLS) to the file transfer port.
     /// File transfers use main port + 1.
-    async fn create_transfer_stream(&self) -> Result<(BoxedRead, BoxedWrite), String> {
-        let transfer_port = self.bookmark.port + 1;
+    pub(super) async fn create_transfer_stream(&self) -> Result<(BoxedRead, BoxedWrite), String> {
+        let transfer_port = self.bookmark.port.checked_add(1).ok_or("Server port has no valid transfer port")?;
         let addr = crate::protocol::socket_addr_string(&self.bookmark.address, transfer_port);
         println!("Connecting to file transfer port: {}", transfer_port);
 
@@ -103,6 +103,10 @@ impl HotlineClient {
     }
 
     pub async fn download_file(&self, path: Vec<String>, file_name: String) -> Result<(u32, Option<u64>), String> {
+        self.download_file_at(path, file_name, 0).await
+    }
+
+    pub async fn download_file_at(&self, path: Vec<String>, file_name: String, offset: u64) -> Result<(u32, Option<u64>), String> {
         println!("Requesting download for file: {:?} / {}", path, file_name);
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::DownloadFile);
@@ -116,6 +120,16 @@ impl HotlineClient {
                 field_type: FieldType::FilePath,
                 data: path_data,
             });
+        }
+
+        if offset > 0 {
+            transaction.add_field(TransactionField::from_u16(FieldType::FileTransferOptions, 2));
+            transaction.add_field(TransactionField::new(FieldType::FileResumeData, super::transfer_io::resume_data(offset)));
+            if self.large_file_support.load(Ordering::SeqCst) {
+                transaction.add_field(TransactionField::from_u64(FieldType::Offset64, offset));
+            } else if offset > u32::MAX as u64 {
+                return Err("Resume offset exceeds this server's limit".into());
+            }
         }
 
         let transaction_id = transaction.id;
@@ -203,6 +217,27 @@ impl HotlineClient {
 
         // Return both reference number and server-reported file size
         Ok((reference_number, file_size))
+    }
+
+    pub async fn receive_file_to_disk<F: FnMut(u64, u64) + Send>(
+        &self, reference: u32, remaining: Option<u64>, offset: u64,
+        file: &mut tokio::fs::File, mut progress: F,
+    ) -> Result<u64, String> {
+        let large = self.large_file_support.load(Ordering::SeqCst);
+        let (reader, mut writer) = self.create_transfer_stream().await?;
+        let mut handshake = b"HTXF".to_vec();
+        handshake.extend_from_slice(&reference.to_be_bytes());
+        handshake.extend_from_slice(&0u32.to_be_bytes());
+        handshake.extend_from_slice(&(if large { HTXF_FLAG_LARGE_FILE } else { 0 }).to_be_bytes());
+        writer.write_all(&handshake).await.map_err(|e| e.to_string())?;
+        writer.flush().await.map_err(|e| e.to_string())?;
+        let mut reader = if let Some(key) = self.derive_transfer_key(reference).await {
+            TransferReader::Aead(HopeAeadStreamReader::new(reader, &key))
+        } else { TransferReader::Plain(reader) };
+        let count = super::transfer_io::receive_file(&mut reader, file, large, remaining, offset == 0, None,
+            |n| progress(offset + n, offset + remaining.unwrap_or(n))).await?;
+        file.flush().await.map_err(|e| e.to_string())?;
+        Ok(count)
     }
 
     pub async fn perform_file_transfer<F>(&self, reference_number: u32, expected_size: u64, mut progress_callback: F) -> Result<Vec<u8>, String>
@@ -685,6 +720,13 @@ impl HotlineClient {
         let transaction_id = self.next_transaction_id();
         let mut transaction = Transaction::new(transaction_id, TransactionType::UploadFile);
 
+        if self.large_file_support.load(Ordering::SeqCst) {
+            transaction.add_field(TransactionField::from_u16(FieldType::FileTransferOptions, 2));
+        } else {
+            let size = u32::try_from(file_data.len() as u64 + 56).map_err(|_| "Upload is too large for a legacy server")?;
+            transaction.add_field(TransactionField::from_u32(FieldType::TransferSize, size));
+        }
+
         // Add file name field
         transaction.add_field(TransactionField {
             field_type: FieldType::FileName,
@@ -736,7 +778,13 @@ impl HotlineClient {
         println!("Upload reference number: {}", reference_number);
 
         // Perform the actual file transfer
-        self.perform_file_upload(reference_number, &file_name, &file_data, &mut progress_callback)
+        let proposed_offset = reply.get_field(FieldType::Offset64).and_then(|f| f.to_u64().ok()).unwrap_or(0);
+        let digest = if self.large_file_support.load(Ordering::SeqCst) {
+            reply.get_field(FieldType::PartialDigest).and_then(|f|
+                super::transfer_io::verified_upload_resume(&file_data, proposed_offset, &f.data))
+        } else { None };
+        let offset = if digest.is_some() { proposed_offset } else { 0 };
+        self.perform_file_upload(reference_number, &file_name, &file_data, offset, digest, &mut progress_callback)
             .await?;
 
         Ok(())
@@ -794,6 +842,8 @@ impl HotlineClient {
         reference_number: u32,
         file_name: &str,
         file_data: &[u8],
+        resume_offset: u64,
+        resume_digest: Option<[u8; 40]>,
         progress_callback: &mut F,
     ) -> Result<(), String>
     where
@@ -811,7 +861,10 @@ impl HotlineClient {
         // FILP header (24) + INFO fork header (16) + INFO fork data (0) + DATA fork header (16) + DATA fork data
         let info_fork_size: u64 = 0;
         let data_fork_size = file_data.len() as u64;
-        let total_size: u64 = 24 + 16 + info_fork_size + 16 + data_fork_size;
+        let total_size: u64 = if large_file_mode { data_fork_size - resume_offset } else { 56 + data_fork_size };
+        if !large_file_mode && total_size > u32::MAX as u64 {
+            return Err("File is too large for this legacy server".into());
+        }
 
         // Send file transfer handshake
         let mut handshake = Vec::with_capacity(if large_file_mode { 24 } else { 16 });
@@ -821,19 +874,21 @@ impl HotlineClient {
         if large_file_mode && total_size > u32::MAX as u64 {
             // Large file: legacy field = 0, set SIZE64 flag, append 8-byte length
             handshake.extend_from_slice(&0u32.to_be_bytes());
-            let flags = HTXF_FLAG_LARGE_FILE | HTXF_FLAG_SIZE64;
+            let flags = HTXF_FLAG_LARGE_FILE | HTXF_FLAG_SIZE64 | if resume_digest.is_some() { HTXF_FLAG_RESUME } else { 0 };
             handshake.extend_from_slice(&flags.to_be_bytes());
             handshake.extend_from_slice(&total_size.to_be_bytes());
         } else if large_file_mode {
             // Large file mode but fits in 32 bits
             handshake.extend_from_slice(&(total_size as u32).to_be_bytes());
-            let flags = HTXF_FLAG_LARGE_FILE;
+            let flags = HTXF_FLAG_LARGE_FILE | if resume_digest.is_some() { HTXF_FLAG_RESUME } else { 0 };
             handshake.extend_from_slice(&flags.to_be_bytes());
         } else {
             // Legacy mode
             handshake.extend_from_slice(&(total_size as u32).to_be_bytes());
             handshake.extend_from_slice(&0u32.to_be_bytes());
         }
+
+        if let Some(digest) = resume_digest { handshake.extend_from_slice(&digest); }
 
         println!("Sending upload handshake ({} bytes): {:02X?}", handshake.len(), &handshake);
         transfer_write
@@ -856,7 +911,8 @@ impl HotlineClient {
 
         println!("Upload handshake sent");
 
-        // Send FILP header
+        if !large_file_mode {
+        // Legacy uploads carry a FILP wrapper; negotiated large-file uploads are raw.
         let mut filp_header = Vec::with_capacity(24);
         filp_header.extend_from_slice(b"FILP");
         filp_header.extend_from_slice(&1u16.to_be_bytes());
@@ -900,9 +956,12 @@ impl HotlineClient {
             .await
             .map_err(|e| format!("Failed to send DATA fork header: {}", e))?;
 
+        }
+
         // Send DATA fork (the actual file data) in chunks with progress tracking
         let chunk_size: u64 = 65536;
-        let mut bytes_sent: u64 = 0;
+        let mut bytes_sent: u64 = resume_offset;
+        progress_callback(bytes_sent, data_fork_size);
         let mut last_reported_progress: u64 = 0;
 
         while bytes_sent < data_fork_size {
@@ -1078,6 +1137,7 @@ impl HotlineClient {
             comment,
             create_date,
             modify_date,
+            modify_date_raw: reply.get_field(FieldType::FileModifyDate).and_then(|f| f.data.as_slice().try_into().ok()),
         })
     }
 
@@ -1251,7 +1311,7 @@ impl HotlineClient {
                 let transfer_size = read_extended_size(&reply, FieldType::TransferSize64, FieldType::TransferSize)
                     .ok_or("No transfer size in reply".to_string())?;
                 let item_count = read_extended_size(&reply, FieldType::FolderItemCount64, FieldType::FolderItemCount)
-                    .unwrap_or(0);
+                    .ok_or("Missing folder item count")?;
                 Ok((reference_number, transfer_size, item_count))
             }
             Ok(None) => {
@@ -1268,9 +1328,15 @@ impl HotlineClient {
     }
 
     /// Upload an entire folder to the server
-    pub async fn upload_folder(&self, path: Vec<String>, file_name: String, item_count: u64) -> Result<u32, String> {
+    pub async fn upload_folder(&self, path: Vec<String>, file_name: String, item_count: u64, total_size: u64) -> Result<u32, String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::UploadFolder);
         transaction.add_field(self.text_field(FieldType::FileName, &file_name));
+        transaction.add_field(TransactionField::from_u32(FieldType::TransferSize, total_size.min(u32::MAX as u64) as u32));
+        if self.large_file_support.load(Ordering::SeqCst) {
+            transaction.add_field(TransactionField::from_u64(FieldType::TransferSize64, total_size));
+        } else if total_size > u32::MAX as u64 {
+            return Err("Folder is too large for this legacy server".into());
+        }
         if self.large_file_support.load(Ordering::SeqCst) {
             transaction.add_field(TransactionField::from_u64(FieldType::FolderItemCount64, item_count));
         } else if item_count > u16::MAX as u64 {
@@ -1603,6 +1669,8 @@ pub struct FileInfoDetails {
     pub comment: String,
     pub create_date: Option<String>,
     pub modify_date: Option<String>,
+    #[serde(skip)]
+    pub modify_date_raw: Option<[u8; 8]>,
 }
 
 /// Prefer an explicitly supplied extended value, including zero. A legacy
@@ -1635,5 +1703,44 @@ mod extended_metadata_tests {
         assert_eq!(read_extended_size(&reply, FieldType::FolderItemCount64, FieldType::FolderItemCount), Some(42));
         reply.add_field(TransactionField::from_u64(FieldType::FolderItemCount64, 0));
         assert_eq!(read_extended_size(&reply, FieldType::FolderItemCount64, FieldType::FolderItemCount), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod upload_wire_tests {
+    use super::*;
+    #[tokio::test]
+    async fn upload_framing_matches_negotiation_and_resume_length() {
+        for (large, offset) in [(false, 0u64), (true, 0), (true, 2)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut header = [0; 16];
+                stream.read_exact(&mut header).await.unwrap();
+                let length = u32::from_be_bytes(header[8..12].try_into().unwrap());
+                let flags = u32::from_be_bytes(header[12..16].try_into().unwrap());
+                assert_eq!(flags, if large { 1 | if offset > 0 { 4 } else { 0 } } else { 0 });
+                if offset > 0 {
+                    let mut digest = [0; 40];
+                    stream.read_exact(&mut digest).await.unwrap();
+                    assert_eq!(digest, [42; 40]);
+                }
+                let mut payload = Vec::new();
+                stream.read_to_end(&mut payload).await.unwrap();
+                assert_eq!(payload.len(), length as usize);
+                if large { assert_eq!(&payload, &b"abcdef"[offset as usize..]); }
+                else { assert_eq!(&payload[..4], b"FILP"); assert_eq!(&payload[56..], b"abcdef"); }
+            });
+            let bookmark = serde_json::from_value(serde_json::json!({
+                "id":"transfer-test", "name":"test", "address":"127.0.0.1", "port":port-1,
+                "login":"guest", "tls":false, "hope":false, "autoConnect":false
+            })).unwrap();
+            let client = HotlineClient::new(bookmark, false);
+            client.large_file_support.store(large, Ordering::SeqCst);
+            client.perform_file_upload(1, "test", b"abcdef", offset,
+                if offset > 0 { Some([42; 40]) } else { None }, &mut |_, _| {}).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        }
     }
 }

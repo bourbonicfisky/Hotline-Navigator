@@ -136,6 +136,8 @@ pub fn run() {
             commands::post_message_board,
             commands::get_file_list,
             commands::download_file,
+            commands::download_folder,
+            commands::upload_folder,
             commands::upload_file,
             commands::get_news_categories,
             commands::get_news_articles,

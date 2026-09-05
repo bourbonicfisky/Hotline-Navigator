@@ -20,7 +20,7 @@ interface FilesTabProps {
   downloadProgress: Map<string, number>;
   uploadProgress?: Map<string, number>;
   onPathChange: (path: string[]) => void;
-  onDownloadFile: (fileName: string, fileSize: number) => Promise<void>;
+  onDownloadFile: (fileName: string, fileSize: number, isFolder?: boolean, sourcePath?: string[]) => Promise<void>;
   onUploadFile?: (file: File) => Promise<void>;
   onRefresh?: () => void;
   getAllCachedFiles?: () => Array<{ file: FileItem; path: string[] }>;
@@ -53,6 +53,8 @@ export default function FilesTab({
   canDeleteFiles = false,
   canRenameFiles = false,
 }: FilesTabProps) {
+  const [folderTransferBusy, setFolderTransferBusy] = useState(false);
+  const [folderTransferError, setFolderTransferError] = useState<string | null>(null);
   const isMobile = useIsMobile();
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewFolderInput, setShowNewFolderInput] = useState(false);
@@ -350,6 +352,19 @@ export default function FilesTab({
           })}
           </div>
           <div className="flex items-center gap-2">
+            {onUploadFile && !isMobile && (
+              <button disabled={folderTransferBusy} className="px-3 py-1.5 text-sm rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
+                onClick={async () => {
+                  try {
+                    setFolderTransferBusy(true);
+                    setFolderTransferError(null);
+                    const uploaded = await invoke<boolean>('upload_folder', { serverId, path: currentPath });
+                    if (uploaded) onRefresh?.();
+                  } catch (error) { setFolderTransferError(String(error)); }
+                  finally { setFolderTransferBusy(false); }
+                }}>{folderTransferBusy ? 'Uploading Folder…' : 'Upload Folder'}</button>
+            )}
+            {folderTransferError && <p role="alert" className="text-sm text-red-600">{folderTransferError}</p>}
             {onUploadFile && (
               <>
                 <input
@@ -523,11 +538,9 @@ export default function FilesTab({
                         label: 'Download',
                         icon: '⬇️',
                         action: () => {
-                          if (!file.isFolder) {
-                            onDownloadFile(file.name, file.size);
-                          }
+                          onDownloadFile(file.name, file.size, file.isFolder, 'path' in item ? item.path : currentPath);
                         },
-                        disabled: file.isFolder,
+
                       },
                       { divider: true, label: '', action: () => {} },
                       {

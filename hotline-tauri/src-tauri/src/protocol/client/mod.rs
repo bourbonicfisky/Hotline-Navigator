@@ -7,6 +7,8 @@ mod hope_aead;
 mod hope_stream;
 pub(crate) mod media;
 mod news;
+mod transfer_io;
+mod folders;
 pub(crate) mod users;
 
 use super::constants::{
@@ -352,6 +354,10 @@ impl HotlineClient {
             bits |= CAPABILITY_INLINE_MEDIA;
         }
         bits
+    }
+
+    pub(crate) fn transfer_identity(&self) -> (&str, u16, &str) {
+        (&self.bookmark.address, self.bookmark.port, &self.bookmark.login)
     }
 
     pub(crate) fn encoding(&self) -> TextEncoding {
