@@ -720,12 +720,10 @@ impl HotlineClient {
         let transaction_id = self.next_transaction_id();
         let mut transaction = Transaction::new(transaction_id, TransactionType::UploadFile);
 
-        if self.large_file_support.load(Ordering::SeqCst) {
-            transaction.add_field(TransactionField::from_u16(FieldType::FileTransferOptions, 2));
-        } else {
-            let size = u32::try_from(file_data.len() as u64 + 56).map_err(|_| "Upload is too large for a legacy server")?;
-            transaction.add_field(TransactionField::from_u32(FieldType::TransferSize, size));
+        if !self.large_file_support.load(Ordering::SeqCst) && file_data.len() as u64 > u32::MAX as u64 - 56 {
+            return Err("Upload is too large for a legacy server".into());
         }
+        transaction.add_field(TransactionField::from_u16(FieldType::FileTransferOptions, 2));
 
         // Add file name field
         transaction.add_field(TransactionField {
@@ -783,7 +781,13 @@ impl HotlineClient {
             reply.get_field(FieldType::PartialDigest).and_then(|f|
                 super::transfer_io::verified_upload_resume(&file_data, proposed_offset, &f.data))
         } else { None };
-        let offset = if digest.is_some() { proposed_offset } else { 0 };
+        let offset = if self.large_file_support.load(Ordering::SeqCst) {
+            if digest.is_some() { proposed_offset } else { 0 }
+        } else if let Some(resume) = reply.get_field(FieldType::FileResumeData) {
+            let offset = super::transfer_io::legacy_resume_offset(&resume.data)?;
+            if offset > file_data.len() as u64 { return Err("Server resume offset exceeds local file size".into()); }
+            offset
+        } else { 0 };
         self.perform_file_upload(reference_number, &file_name, &file_data, offset, digest, &mut progress_callback)
             .await?;
 
@@ -861,7 +865,7 @@ impl HotlineClient {
         // FILP header (24) + INFO fork header (16) + INFO fork data (0) + DATA fork header (16) + DATA fork data
         let info_fork_size: u64 = 0;
         let data_fork_size = file_data.len() as u64;
-        let total_size: u64 = if large_file_mode { data_fork_size - resume_offset } else { 56 + data_fork_size };
+        let total_size: u64 = if large_file_mode { data_fork_size - resume_offset } else { 56 + data_fork_size - resume_offset };
         if !large_file_mode && total_size > u32::MAX as u64 {
             return Err("File is too large for this legacy server".into());
         }
@@ -950,7 +954,7 @@ impl HotlineClient {
             .map_err(|e| format!("Failed to send INFO fork header: {}", e))?;
 
         // DATA fork header
-        let data_fork_header = build_fork_header(b"DATA", data_fork_size);
+        let data_fork_header = build_fork_header(b"DATA", data_fork_size - resume_offset);
         transfer_write
             .write_all(&data_fork_header)
             .await
@@ -1711,7 +1715,7 @@ mod upload_wire_tests {
     use super::*;
     #[tokio::test]
     async fn upload_framing_matches_negotiation_and_resume_length() {
-        for (large, offset) in [(false, 0u64), (true, 0), (true, 2)] {
+        for (large, offset) in [(false, 0u64), (false, 2), (true, 0), (true, 2)] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let server = tokio::spawn(async move {
@@ -1720,8 +1724,8 @@ mod upload_wire_tests {
                 stream.read_exact(&mut header).await.unwrap();
                 let length = u32::from_be_bytes(header[8..12].try_into().unwrap());
                 let flags = u32::from_be_bytes(header[12..16].try_into().unwrap());
-                assert_eq!(flags, if large { 1 | if offset > 0 { 4 } else { 0 } } else { 0 });
-                if offset > 0 {
+                assert_eq!(flags, if large { 1 | if large && offset > 0 { 4 } else { 0 } } else { 0 });
+                if large && offset > 0 {
                     let mut digest = [0; 40];
                     stream.read_exact(&mut digest).await.unwrap();
                     assert_eq!(digest, [42; 40]);
@@ -1730,7 +1734,7 @@ mod upload_wire_tests {
                 stream.read_to_end(&mut payload).await.unwrap();
                 assert_eq!(payload.len(), length as usize);
                 if large { assert_eq!(&payload, &b"abcdef"[offset as usize..]); }
-                else { assert_eq!(&payload[..4], b"FILP"); assert_eq!(&payload[56..], b"abcdef"); }
+                else { assert_eq!(&payload[..4], b"FILP"); assert_eq!(&payload[56..], &b"abcdef"[offset as usize..]); }
             });
             let bookmark = serde_json::from_value(serde_json::json!({
                 "id":"transfer-test", "name":"test", "address":"127.0.0.1", "port":port-1,
@@ -1739,7 +1743,7 @@ mod upload_wire_tests {
             let client = HotlineClient::new(bookmark, false);
             client.large_file_support.store(large, Ordering::SeqCst);
             client.perform_file_upload(1, "test", b"abcdef", offset,
-                if offset > 0 { Some([42; 40]) } else { None }, &mut |_, _| {}).await.unwrap();
+                if large && offset > 0 { Some([42; 40]) } else { None }, &mut |_, _| {}).await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
         }
     }

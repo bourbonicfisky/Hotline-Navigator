@@ -9,6 +9,6 @@
 - [x] Validate protocol fixtures, frontend checks, and production build.
 - [ ] Live classic/modern server and AEAD folder interoperability smoke tests.
 
-Limits: single-file upload resume is enabled for negotiated large-file sessions with a valid digest. Classic single-file uploads restart. Folder upload uses the desktop picker; mobile folder upload is not available. Files exceeding the 32-bit per-file folder framing limit must be uploaded individually. Folder downloads preserve completed files on failure; retries create a new folder rather than appending without a file identity check.
+Limits: large-file upload resume requires a valid digest; classic resume follows RFLT fork offsets. Classic single-file uploads use the returned RFLT offset. Folder upload uses the desktop picker; mobile folder upload is not available. Files exceeding the 32-bit per-file folder framing limit must be uploaded individually. Folder downloads preserve completed files on failure; retries create a new folder rather than appending without a file identity check.
 
 Validation: 144 Rust tests, 84 frontend tests, TypeScript checks and production web build passed.
