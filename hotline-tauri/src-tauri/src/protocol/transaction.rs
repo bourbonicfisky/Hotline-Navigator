@@ -1,5 +1,6 @@
 // Hotline transaction structures
 
+use super::types::{TextEncoding, decode_bytes, encode_text};
 use super::constants::{FieldType, TransactionType, TRANSACTION_HEADER_SIZE};
 
 #[derive(Debug, Clone)]
@@ -14,16 +15,11 @@ impl TransactionField {
     }
 
     pub fn from_string(field_type: FieldType, value: &str) -> Self {
-        // Encode as MacRoman when possible — retro servers only understand
-        // MacRoman.  Fall back to UTF-8 only when the string contains
-        // characters that cannot be represented in MacRoman (e.g. CJK).
-        let (encoded, _encoding, had_unmappable) = encoding_rs::MACINTOSH.encode(value);
-        let data = if had_unmappable {
-            value.as_bytes().to_vec()
-        } else {
-            encoded.into_owned()
-        };
-        Self { field_type, data }
+        Self::from_string_with(field_type, value, TextEncoding::Macintosh)
+    }
+
+    pub fn from_string_with(field_type: FieldType, value: &str, encoding: TextEncoding) -> Self {
+        Self { field_type, data: encode_text(value, encoding) }
     }
 
     pub fn from_encoded_string(field_type: FieldType, value: &str) -> Self {
@@ -78,6 +74,10 @@ impl TransactionField {
     }
 
     pub fn from_path(field_type: FieldType, path: &[String]) -> Self {
+        Self::from_path_with(field_type, path, TextEncoding::Macintosh)
+    }
+
+    pub fn from_path_with(field_type: FieldType, path: &[String], encoding: TextEncoding) -> Self {
         let mut data = Vec::new();
 
         // Write count of path components
@@ -85,19 +85,16 @@ impl TransactionField {
 
         // Write each path component with MacRoman encoding
         for component in path {
-            // Try MacRoman first (native Hotline encoding), fall back to UTF-8
-            let (encoded, _, had_unmappable) = encoding_rs::MACINTOSH.encode(component);
-            let component_bytes = if had_unmappable {
-                component.as_bytes()
-            } else {
-                &encoded
-            };
+            let component_bytes = encode_text(component, encoding);
 
             // Write separator (always 0)
             data.extend_from_slice(&0u16.to_be_bytes());
 
             // Protocol limits component length to 1 byte (255 max)
-            let len = component_bytes.len().min(255);
+            let mut len = component_bytes.len().min(255);
+            if encoding == TextEncoding::Utf8 {
+                while !component.is_char_boundary(len) { len -= 1; }
+            }
             data.push(len as u8);
             data.extend_from_slice(&component_bytes[..len]);
         }
@@ -109,21 +106,11 @@ impl TransactionField {
     }
 
     pub fn to_string(&self) -> Result<String, String> {
-        // Try UTF-8 first
-        let s = if let Ok(s) = String::from_utf8(self.data.clone()) {
-            s
-        } else {
-            // Fall back to MacOS Roman (x-mac-roman) - this is what Hotline protocol uses
-            let (decoded, _encoding, had_errors) = encoding_rs::MACINTOSH.decode(&self.data);
-            if had_errors {
-                return Err("Failed to decode string".to_string());
-            }
-            decoded.into_owned()
-        };
+        self.to_string_with(TextEncoding::Macintosh)
+    }
 
-        // Classic Mac OS used \r (carriage return) for line breaks, but modern systems use \n
-        // Convert \r to \n so they render properly in HTML
-        Ok(s.replace('\r', "\n"))
+    pub fn to_string_with(&self, encoding: TextEncoding) -> Result<String, String> {
+        Ok(decode_bytes(&self.data, encoding))
     }
 
     pub fn to_u16(&self) -> Result<u16, String> {
@@ -345,10 +332,10 @@ mod tests {
     }
 
     #[test]
-    fn field_from_string_unmappable_falls_back_to_utf8() {
-        // CJK character has no MacRoman mapping — should fall back to UTF-8
+    fn field_from_string_unmappable_preserves_macroman() {
+        // Legacy sessions must not silently switch to UTF-8.
         let field = TransactionField::from_string(FieldType::Data, "日本語");
-        assert_eq!(field.data, "日本語".as_bytes());
+        assert_eq!(field.data, b"???");
     }
 
     #[test]
@@ -491,6 +478,16 @@ mod tests {
         let field = TransactionField::from_string(FieldType::Data, "line1\rline2\rline3");
         let result = field.to_string().unwrap();
         assert_eq!(result, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn utf8_paths_use_encoded_byte_lengths_and_whole_characters() {
+        let path = vec!["é".repeat(128), "日本語".to_string()];
+        let field = TransactionField::from_path_with(FieldType::FilePath, &path, TextEncoding::Utf8);
+        assert_eq!(field.data[4], 254);
+        assert_eq!(std::str::from_utf8(&field.data[5..259]).unwrap(), "é".repeat(127));
+        assert_eq!(field.data[261], 9);
+        assert_eq!(&field.data[262..], "日本語".as_bytes());
     }
 
     // ── Transaction ───────────────────────────────────────────────

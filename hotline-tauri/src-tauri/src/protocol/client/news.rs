@@ -1,3 +1,4 @@
+use crate::protocol::types::{TextEncoding, decode_bytes};
 // News and message board functionality for Hotline client
 
 use super::HotlineClient;
@@ -34,7 +35,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             return Err(format!("Get message board failed: {}", error_msg));
         }
@@ -44,7 +45,7 @@ impl HotlineClient {
             .map(|f| f.data.clone())
             .unwrap_or_default();
 
-        let posts = parse_message_board_data(&raw_data);
+        let posts = parse_message_board_data(&raw_data, self.encoding());
 
         println!("Received message board: {} posts", posts.len());
 
@@ -55,7 +56,7 @@ impl HotlineClient {
         println!("Posting to message board: {} chars", text.len());
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::OldPostNews);
-        transaction.add_field(TransactionField::from_string(FieldType::Data, &text));
+        transaction.add_field(self.text_field(FieldType::Data, &text));
 
         self.send_transaction(&transaction).await?;
 
@@ -68,7 +69,7 @@ impl HotlineClient {
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::GetNewsCategoryList);
         if !path.is_empty() {
-            transaction.add_field(TransactionField::from_path(FieldType::NewsPath, &path));
+            transaction.add_field(self.path_field(FieldType::NewsPath, &path));
         }
 
         let transaction_id = transaction.id;
@@ -101,7 +102,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             if reply.error_code == 1 || error_msg.to_lowercase().contains("not supported") {
                 return Err("News is not supported on this server".to_string());
@@ -134,7 +135,7 @@ impl HotlineClient {
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::GetNewsArticleList);
         if !path.is_empty() {
-            transaction.add_field(TransactionField::from_path(FieldType::NewsPath, &path));
+            transaction.add_field(self.path_field(FieldType::NewsPath, &path));
         }
 
         let transaction_id = transaction.id;
@@ -164,7 +165,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             if reply.error_code == 1 || error_msg.to_lowercase().contains("not supported") {
                 return Err("News is not supported on this server".to_string());
@@ -187,9 +188,9 @@ impl HotlineClient {
         println!("Requesting news article data for ID {} at path: {:?}", article_id, path);
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::GetNewsArticleData);
-        transaction.add_field(TransactionField::from_path(FieldType::NewsPath, &path));
+        transaction.add_field(self.path_field(FieldType::NewsPath, &path));
         transaction.add_field(TransactionField::from_u32(FieldType::NewsArticleId, article_id));
-        transaction.add_field(TransactionField::from_string(FieldType::NewsArticleDataFlavor, "text/plain"));
+        transaction.add_field(self.text_field(FieldType::NewsArticleDataFlavor, "text/plain"));
 
         let transaction_id = transaction.id;
         let (tx, mut rx) = mpsc::channel(1);
@@ -218,7 +219,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             return Err(format!("Get news article data failed: {}", error_msg));
         }
@@ -229,7 +230,7 @@ impl HotlineClient {
         let content = reply
             .get_field(FieldType::NewsArticleData)
             .or_else(|| reply.get_field(FieldType::Data))
-            .and_then(|f| f.to_string().ok())
+            .and_then(|f| f.to_string_with(self.encoding()).ok())
             .unwrap_or_default();
 
         if content.is_empty() && !reply.fields.is_empty() {
@@ -269,12 +270,12 @@ impl HotlineClient {
         println!("Posting news article '{}' to path: {:?}", title, path);
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::PostNewsArticle);
-        transaction.add_field(TransactionField::from_path(FieldType::NewsPath, &path));
+        transaction.add_field(self.path_field(FieldType::NewsPath, &path));
         transaction.add_field(TransactionField::from_u32(FieldType::NewsArticleId, parent_id));
-        transaction.add_field(TransactionField::from_string(FieldType::NewsArticleTitle, &title));
-        transaction.add_field(TransactionField::from_string(FieldType::NewsArticleDataFlavor, "text/plain"));
+        transaction.add_field(self.text_field(FieldType::NewsArticleTitle, &title));
+        transaction.add_field(self.text_field(FieldType::NewsArticleDataFlavor, "text/plain"));
         transaction.add_field(TransactionField::from_u32(FieldType::NewsArticleFlags, 0));
-        transaction.add_field(TransactionField::from_string(FieldType::NewsArticleData, &text));
+        transaction.add_field(self.text_field(FieldType::NewsArticleData, &text));
 
         let transaction_id = transaction.id;
         let (tx, mut rx) = mpsc::channel(1);
@@ -303,7 +304,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             println!("Post news article error: code={}, message={}", reply.error_code, error_msg);
             return Err(format!("Post news article failed: {}", error_msg));
@@ -319,9 +320,9 @@ impl HotlineClient {
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::NewNewsCategory);
         if !path.is_empty() {
-            transaction.add_field(TransactionField::from_path(FieldType::NewsPath, &path));
+            transaction.add_field(self.path_field(FieldType::NewsPath, &path));
         }
-        transaction.add_field(TransactionField::from_string(FieldType::NewsCategoryName, &name));
+        transaction.add_field(self.text_field(FieldType::NewsCategoryName, &name));
 
         let transaction_id = transaction.id;
         let (tx, mut rx) = mpsc::channel(1);
@@ -339,7 +340,7 @@ impl HotlineClient {
         };
 
         if reply.error_code != 0 {
-            let msg = resolve_error_message(reply.error_code, reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok()));
+            let msg = resolve_error_message(reply.error_code, reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok()));
             return Err(format!("Create news category failed: {}", msg));
         }
         println!("News category '{}' created", name);
@@ -351,9 +352,9 @@ impl HotlineClient {
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::NewNewsFolder);
         if !path.is_empty() {
-            transaction.add_field(TransactionField::from_path(FieldType::NewsPath, &path));
+            transaction.add_field(self.path_field(FieldType::NewsPath, &path));
         }
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &name));
+        transaction.add_field(self.text_field(FieldType::FileName, &name));
 
         let transaction_id = transaction.id;
         let (tx, mut rx) = mpsc::channel(1);
@@ -371,7 +372,7 @@ impl HotlineClient {
         };
 
         if reply.error_code != 0 {
-            let msg = resolve_error_message(reply.error_code, reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok()));
+            let msg = resolve_error_message(reply.error_code, reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok()));
             return Err(format!("Create news folder failed: {}", msg));
         }
         println!("News folder '{}' created", name);
@@ -382,7 +383,7 @@ impl HotlineClient {
         println!("Deleting news item at path: {:?}", path);
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::DeleteNewsItem);
-        transaction.add_field(TransactionField::from_path(FieldType::NewsPath, &path));
+        transaction.add_field(self.path_field(FieldType::NewsPath, &path));
 
         let transaction_id = transaction.id;
         let (tx, mut rx) = mpsc::channel(1);
@@ -400,7 +401,7 @@ impl HotlineClient {
         };
 
         if reply.error_code != 0 {
-            let msg = resolve_error_message(reply.error_code, reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok()));
+            let msg = resolve_error_message(reply.error_code, reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok()));
             return Err(format!("Delete news item failed: {}", msg));
         }
         println!("News item deleted at path: {:?}", path);
@@ -411,7 +412,7 @@ impl HotlineClient {
         println!("Deleting news article {} at path: {:?} (recursive: {})", article_id, path, recursive);
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::DeleteNewsArticle);
-        transaction.add_field(TransactionField::from_path(FieldType::NewsPath, &path));
+        transaction.add_field(self.path_field(FieldType::NewsPath, &path));
         transaction.add_field(TransactionField::from_u32(FieldType::NewsArticleId, article_id));
         transaction.add_field(TransactionField::from_u16(FieldType::NewsArticleRecursiveDelete, if recursive { 1 } else { 0 }));
 
@@ -431,7 +432,7 @@ impl HotlineClient {
         };
 
         if reply.error_code != 0 {
-            let msg = resolve_error_message(reply.error_code, reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok()));
+            let msg = resolve_error_message(reply.error_code, reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok()));
             return Err(format!("Delete news article failed: {}", msg));
         }
         println!("News article {} deleted", article_id);
@@ -450,7 +451,7 @@ impl HotlineClient {
         if data.len() < 1 + name_len {
             return Err("Legacy category name too short".to_string());
         }
-        let (decoded, _, _) = encoding_rs::MACINTOSH.decode(&data[1..1 + name_len]);
+        let decoded = decode_bytes(&data[1..1 + name_len], self.encoding());
         let name = decoded.to_string();
 
         let mut path = parent_path.to_vec();
@@ -482,7 +483,7 @@ impl HotlineClient {
             if data.len() < 5 + name_len {
                 return Err("Bundle name too short".to_string());
             }
-            String::from_utf8_lossy(&data[5..5 + name_len]).to_string()
+            decode_bytes(&data[5..5 + name_len], self.encoding())
         } else if category_type == 3 {
             // Category: PString at offset 28
             if data.len() < 29 {
@@ -492,7 +493,7 @@ impl HotlineClient {
             if data.len() < 29 + name_len {
                 return Err("Category name too short".to_string());
             }
-            let (decoded, _, _) = encoding_rs::MACINTOSH.decode(&data[29..29 + name_len]);
+            let decoded = decode_bytes(&data[29..29 + name_len], self.encoding());
             decoded.to_string()
         } else {
             return Err(format!("Unknown category type: {}", category_type));
@@ -579,7 +580,7 @@ impl HotlineClient {
             if offset + title_len > data.len() {
                 break;
             }
-            let (title_decoded, _, _) = encoding_rs::MACINTOSH.decode(&data[offset..offset + title_len]);
+            let title_decoded = decode_bytes(&data[offset..offset + title_len], self.encoding());
             let title = title_decoded.to_string();
             offset += title_len;
 
@@ -592,7 +593,7 @@ impl HotlineClient {
             if offset + poster_len > data.len() {
                 break;
             }
-            let (poster_decoded, _, _) = encoding_rs::MACINTOSH.decode(&data[offset..offset + poster_len]);
+            let poster_decoded = decode_bytes(&data[offset..offset + poster_len], self.encoding());
             let poster = poster_decoded.to_string();
             offset += poster_len;
 
@@ -629,9 +630,8 @@ impl HotlineClient {
 }
 
 // --- Message board parsing helpers ---
-// Boards mix UTF-8 (modern clients) and Mac Roman (old clients) posts.
-// We split on divider lines in raw bytes before decoding so each post
-// gets its own UTF-8 → Mac Roman fallback pass.
+// Decode posts with the negotiated session encoding.
+// Divider lines are ASCII; split their raw bytes before decoding each post.
 
 fn split_raw_lines(data: &[u8]) -> Vec<Vec<u8>> {
     let mut lines: Vec<Vec<u8>> = Vec::new();
@@ -700,22 +700,16 @@ fn find_canonical_divider(lines: &[Vec<u8>]) -> Option<u8> {
         .map(|(c, _)| *c)
 }
 
-fn decode_post_bytes(data: &[u8]) -> Option<String> {
+fn decode_post_bytes(data: &[u8], encoding: TextEncoding) -> Option<String> {
     if data.is_empty() {
         return None;
     }
-    let s = if let Ok(s) = std::str::from_utf8(data) {
-        s.to_owned()
-    } else {
-        let (decoded, _, _) = encoding_rs::MACINTOSH.decode(data);
-        decoded.into_owned()
-    };
-    let s = s.replace('\r', "\n");
+    let s = decode_bytes(data, encoding);
     let trimmed = s.trim().to_string();
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
-fn parse_message_board_data(data: &[u8]) -> Vec<String> {
+fn parse_message_board_data(data: &[u8], encoding: TextEncoding) -> Vec<String> {
     if data.is_empty() {
         return Vec::new();
     }
@@ -728,7 +722,7 @@ fn parse_message_board_data(data: &[u8]) -> Vec<String> {
         if let (Some(lead), Some(canon)) = (classify_divider_lead(line), canonical) {
             if lead == canon {
                 if !current.is_empty() {
-                    if let Some(post) = decode_post_bytes(&current) {
+                    if let Some(post) = decode_post_bytes(&current, encoding) {
                         posts.push(post);
                     }
                     current.clear();
@@ -743,7 +737,7 @@ fn parse_message_board_data(data: &[u8]) -> Vec<String> {
     }
 
     if !current.is_empty() {
-        if let Some(post) = decode_post_bytes(&current) {
+        if let Some(post) = decode_post_bytes(&current, encoding) {
             posts.push(post);
         }
     }

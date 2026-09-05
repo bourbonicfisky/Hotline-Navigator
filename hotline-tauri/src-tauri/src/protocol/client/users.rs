@@ -1,3 +1,4 @@
+use crate::protocol::types::{TextEncoding, decode_bytes};
 // User management functionality for Hotline client
 
 use super::HotlineClient;
@@ -19,7 +20,7 @@ impl HotlineClient {
         Ok(())
     }
 
-    pub(crate) fn parse_user_info(data: &[u8]) -> Result<(u16, String, u16, u16, Option<u32>), String> {
+    pub(crate) fn parse_user_info(data: &[u8], encoding: TextEncoding) -> Result<(u16, String, u16, u16, Option<u32>), String> {
         // UserNameWithInfo format:
         // 2 bytes: User ID
         // 2 bytes: Icon ID
@@ -41,7 +42,7 @@ impl HotlineClient {
             return Err("UserNameWithInfo username data too short".to_string());
         }
 
-        let username = String::from_utf8_lossy(&data[8..8 + name_len]).to_string();
+        let username = decode_bytes(&data[8..8 + name_len], encoding);
 
         // Legacy Mobius convention: 4 trailing color bytes after the username in
         // UserNameWithInfo. The fogWraith canonical form is the standalone field
@@ -115,14 +116,14 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             return Err(format!("Get client info failed: {}", error_msg));
         }
 
         let info = reply
             .get_field(FieldType::Data)
-            .and_then(|f| f.to_string().ok())
+            .and_then(|f| f.to_string_with(self.encoding()).ok())
             .unwrap_or_else(|| "No info available".to_string());
 
         Ok(info)
@@ -149,7 +150,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("User access request failed: {}", error_msg));
                 }
@@ -188,7 +189,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("List users failed: {}", error_msg));
                 }
@@ -203,13 +204,13 @@ impl HotlineClient {
                         let login_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
                         offset += 2;
                         if offset + login_len > data.len() { continue; }
-                        let login = String::from_utf8_lossy(&data[offset..offset + login_len]).to_string();
+                        let login = decode_bytes(&data[offset..offset + login_len], self.encoding());
                         offset += login_len;
                         let name = if offset + 2 <= data.len() {
                             let name_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
                             offset += 2;
                             if offset + name_len <= data.len() {
-                                String::from_utf8_lossy(&data[offset..offset + name_len]).to_string()
+                                decode_bytes(&data[offset..offset + name_len], self.encoding())
                             } else {
                                 String::new()
                             }
@@ -243,13 +244,13 @@ impl HotlineClient {
         access: Option<&[u8]>,
     ) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::UpdateUser);
-        transaction.add_field(TransactionField::from_string(FieldType::UserLogin, login));
+        transaction.add_field(self.text_field(FieldType::UserLogin, login));
 
         if let Some(n) = name {
-            transaction.add_field(TransactionField::from_string(FieldType::UserName, n));
+            transaction.add_field(self.text_field(FieldType::UserName, n));
         }
         if let Some(p) = password {
-            transaction.add_field(TransactionField::from_string(FieldType::UserPassword, p));
+            transaction.add_field(TransactionField::new(FieldType::UserPassword, p.as_bytes().to_vec()));
         }
         if let Some(a) = access {
             transaction.add_field(TransactionField::new(FieldType::UserAccess, a.to_vec()));
@@ -267,7 +268,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Update user failed: {}", error_msg));
                 }
@@ -295,9 +296,9 @@ impl HotlineClient {
         access: &[u8],
     ) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::NewUser);
-        transaction.add_field(TransactionField::from_string(FieldType::UserLogin, login));
-        transaction.add_field(TransactionField::from_string(FieldType::UserName, name));
-        transaction.add_field(TransactionField::from_string(FieldType::UserPassword, password));
+        transaction.add_field(self.text_field(FieldType::UserLogin, login));
+        transaction.add_field(self.text_field(FieldType::UserName, name));
+        transaction.add_field(TransactionField::new(FieldType::UserPassword, password.as_bytes().to_vec()));
         transaction.add_field(TransactionField::new(FieldType::UserAccess, access.to_vec()));
 
         let transaction_id = transaction.id;
@@ -312,7 +313,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Create user failed: {}", error_msg));
                 }
@@ -334,7 +335,7 @@ impl HotlineClient {
     /// Delete a user account (admin function, transaction 351)
     pub async fn delete_user_account(&self, login: &str) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::DeleteUser);
-        transaction.add_field(TransactionField::from_string(FieldType::UserLogin, login));
+        transaction.add_field(self.text_field(FieldType::UserLogin, login));
 
         let transaction_id = transaction.id;
         let (tx, mut rx) = mpsc::channel(1);
@@ -348,7 +349,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Delete user failed: {}", error_msg));
                 }
@@ -370,7 +371,7 @@ impl HotlineClient {
     /// Get a user account's details (admin function, transaction 352)
     pub async fn get_user_account(&self, login: &str) -> Result<UserAccountDetails, String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::GetUser);
-        transaction.add_field(TransactionField::from_string(FieldType::UserLogin, login));
+        transaction.add_field(self.text_field(FieldType::UserLogin, login));
 
         let transaction_id = transaction.id;
         let (tx, mut rx) = mpsc::channel(1);
@@ -384,12 +385,12 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Get user failed: {}", error_msg));
                 }
-                let name = reply.get_field(FieldType::UserName).and_then(|f| f.to_string().ok()).unwrap_or_default();
-                let login = reply.get_field(FieldType::UserLogin).and_then(|f| f.to_string().ok()).unwrap_or_default();
+                let name = reply.get_field(FieldType::UserName).and_then(|f| f.to_string_with(self.encoding()).ok()).unwrap_or_default();
+                let login = reply.get_field(FieldType::UserLogin).and_then(|f| f.to_string_with(self.encoding()).ok()).unwrap_or_default();
                 let access = reply.get_field(FieldType::UserAccess).map(|f| f.data.clone()).unwrap_or_default();
                 Ok(UserAccountDetails { login, name, access })
             }
@@ -415,13 +416,13 @@ impl HotlineClient {
         access: Option<&[u8]>,
     ) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::SetUser);
-        transaction.add_field(TransactionField::from_string(FieldType::UserLogin, login));
+        transaction.add_field(self.text_field(FieldType::UserLogin, login));
 
         if let Some(n) = name {
-            transaction.add_field(TransactionField::from_string(FieldType::UserName, n));
+            transaction.add_field(self.text_field(FieldType::UserName, n));
         }
         if let Some(p) = password {
-            transaction.add_field(TransactionField::from_string(FieldType::UserPassword, p));
+            transaction.add_field(TransactionField::new(FieldType::UserPassword, p.as_bytes().to_vec()));
         }
         if let Some(a) = access {
             transaction.add_field(TransactionField::new(FieldType::UserAccess, a.to_vec()));
@@ -439,7 +440,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Set user failed: {}", error_msg));
                 }

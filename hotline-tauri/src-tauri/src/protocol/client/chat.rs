@@ -43,7 +43,7 @@ impl HotlineClient {
         }
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::SendChat);
-        transaction.add_field(TransactionField::from_string(FieldType::Data, &message));
+        transaction.add_field(self.text_field(FieldType::Data, &message));
         transaction.add_field(TransactionField::from_u16(FieldType::ChatOptions, 0));
         if let Some(m) = media {
             add_media_fields(&mut transaction, &m)?;
@@ -57,7 +57,7 @@ impl HotlineClient {
 
     pub async fn send_broadcast(&self, message: String) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::UserBroadcast);
-        transaction.add_field(TransactionField::from_string(FieldType::Data, &message));
+        transaction.add_field(self.text_field(FieldType::Data, &message));
 
         self.send_transaction(&transaction).await
     }
@@ -84,7 +84,7 @@ impl HotlineClient {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::SendInstantMessage);
         transaction.add_field(TransactionField::from_u16(FieldType::UserId, user_id));
         transaction.add_field(TransactionField::from_u32(FieldType::Options, 1));
-        transaction.add_field(TransactionField::from_string(FieldType::Data, &message));
+        transaction.add_field(self.text_field(FieldType::Data, &message));
         if let Some(m) = media {
             add_media_fields(&mut transaction, &m)?;
         }
@@ -97,7 +97,7 @@ impl HotlineClient {
 
     pub async fn send_set_client_user_info(&self, username: &str, icon_id: u16, color: Option<u32>) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::SetClientUserInfo);
-        transaction.add_field(TransactionField::from_string(FieldType::UserName, username));
+        transaction.add_field(self.text_field(FieldType::UserName, username));
         transaction.add_field(TransactionField::from_u16(FieldType::UserIconId, icon_id));
         transaction.add_field(TransactionField::from_u16(FieldType::Options, 0));
 
@@ -134,7 +134,7 @@ impl HotlineClient {
                 pending.remove(&transaction_id);
 
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     return Err(resolve_error_message(reply.error_code, server_text));
                 }
 
@@ -193,20 +193,20 @@ impl HotlineClient {
                 pending.remove(&transaction_id);
 
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     return Err(resolve_error_message(reply.error_code, server_text));
                 }
 
                 let subject = reply
                     .get_field(FieldType::ChatSubject)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(self.encoding()).ok())
                     .unwrap_or_default();
 
                 // Parse user list from UserNameWithInfo fields
                 let users: Vec<(u16, String, u16, u16, Option<u32>)> = reply.fields.iter()
                     .filter(|f| f.field_type == FieldType::UserNameWithInfo)
                     .filter_map(|f| {
-                        Self::parse_user_info(&f.data).ok()
+                        Self::parse_user_info(&f.data, self.encoding()).ok()
                     })
                     .collect();
 
@@ -236,7 +236,7 @@ impl HotlineClient {
     pub async fn set_chat_subject(&self, chat_id: u32, subject: String) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::SetChatSubject);
         transaction.add_field(TransactionField::from_u32(FieldType::ChatId, chat_id));
-        transaction.add_field(TransactionField::from_string(FieldType::ChatSubject, &subject));
+        transaction.add_field(self.text_field(FieldType::ChatSubject, &subject));
         self.send_transaction(&transaction).await
     }
 
@@ -285,7 +285,7 @@ impl HotlineClient {
                 pending.remove(&transaction_id);
 
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     return Err(resolve_error_message(reply.error_code, server_text));
                 }
 
@@ -293,7 +293,7 @@ impl HotlineClient {
                 let entries: Vec<HistoryEntry> = reply.fields.iter()
                     .filter(|f| f.field_type == FieldType::HistoryEntry)
                     .filter_map(|f| {
-                        match history::parse_history_entry(&f.data) {
+                        match history::parse_history_entry_with(&f.data, self.encoding()) {
                             Ok(entry) => Some(entry),
                             Err(e) => {
                                 println!("Warning: failed to parse history entry: {}", e);
@@ -354,7 +354,7 @@ impl HotlineClient {
         }
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::SendChat);
-        transaction.add_field(TransactionField::from_string(FieldType::Data, &message));
+        transaction.add_field(self.text_field(FieldType::Data, &message));
         transaction.add_field(TransactionField::from_u32(FieldType::ChatId, chat_id));
         transaction.add_field(TransactionField::from_u16(FieldType::ChatOptions, 0));
         if let Some(m) = media {
@@ -380,7 +380,7 @@ impl HotlineClient {
         };
 
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::Agreed);
-        transaction.add_field(TransactionField::from_string(FieldType::UserName, &username));
+        transaction.add_field(self.text_field(FieldType::UserName, &username));
         transaction.add_field(TransactionField::from_u16(FieldType::UserIconId, user_icon_id));
         transaction.add_field(TransactionField::from_u16(FieldType::Options, 0));
 

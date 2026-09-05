@@ -107,3 +107,71 @@ pub struct NewsArticle {
     pub date: Option<String>,
     pub path: Vec<String>,  // Path to containing category
 }
+
+/// Wire text encoding selected by the server's capability reply.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TextEncoding {
+    #[default]
+    Macintosh,
+    Utf8,
+}
+
+impl TextEncoding {
+    pub fn negotiated(capabilities: u64) -> Self {
+        if capabilities & super::constants::CAPABILITY_TEXT_ENCODING != 0 {
+            Self::Utf8
+        } else {
+            Self::Macintosh
+        }
+    }
+}
+
+pub fn decode_bytes(data: &[u8], encoding: TextEncoding) -> String {
+    let text = match encoding {
+        TextEncoding::Utf8 => String::from_utf8_lossy(data),
+        TextEncoding::Macintosh => encoding_rs::MACINTOSH.decode(data).0,
+    };
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+pub fn encode_text(text: &str, encoding: TextEncoding) -> Vec<u8> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if encoding == TextEncoding::Utf8 {
+        return normalized.into_bytes();
+    }
+    // encoding_rs emits numeric HTML references for unmappable characters.
+    // Hotline requires a single '?' instead, while preserving other text.
+    let mut bytes = Vec::with_capacity(text.len());
+    for ch in normalized.chars() {
+        if ch == '\n' { bytes.push(b'\r'); continue; }
+        let mut buf = [0; 4];
+        let (encoded, _, unmappable) = encoding_rs::MACINTOSH.encode(ch.encode_utf8(&mut buf));
+        if unmappable { bytes.push(b'?'); } else { bytes.extend_from_slice(&encoded); }
+    }
+    bytes
+}
+
+#[cfg(test)]
+mod text_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn conversion_uses_session_encoding_without_guessing() {
+        assert_eq!(decode_bytes(b"\xc3\xa9", TextEncoding::Utf8), "é");
+        assert_eq!(decode_bytes(b"\xc3\xa9", TextEncoding::Macintosh), "√©");
+        for encoding in [TextEncoding::Macintosh, TextEncoding::Utf8] {
+            assert_eq!(decode_bytes(&encode_text("åäö café", encoding), encoding), "åäö café");
+        }
+        assert_eq!(encode_text("café 日本語", TextEncoding::Macintosh), b"caf\x8e ???");
+        assert_eq!(decode_bytes(&encode_text("日本語", TextEncoding::Utf8), TextEncoding::Utf8), "日本語");
+        assert_eq!(decode_bytes(b"a\r\nb\rc\nd", TextEncoding::Utf8), "a\nb\nc\nd");
+        assert_eq!(decode_bytes(b"\xff", TextEncoding::Utf8), "�");
+    }
+
+    #[test]
+    fn utf8_requires_server_confirmation() {
+        assert_eq!(TextEncoding::negotiated(0), TextEncoding::Macintosh);
+        assert_eq!(TextEncoding::negotiated(0xfffd), TextEncoding::Macintosh);
+        assert_eq!(TextEncoding::negotiated(2), TextEncoding::Utf8);
+    }
+}

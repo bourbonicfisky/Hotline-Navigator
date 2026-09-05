@@ -16,7 +16,7 @@ use super::constants::{
     CAPABILITY_INLINE_MEDIA, ACCESS_SEND_MEDIA, resolve_error_message,
 };
 use super::transaction::{Transaction, TransactionField};
-use super::types::{Bookmark, ConnectionStatus, ServerInfo};
+use super::types::{Bookmark, ConnectionStatus, ServerInfo, TextEncoding};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -216,6 +216,7 @@ pub struct FileInfo {
 pub struct HotlineClient {
     bookmark: Bookmark,
     allow_legacy_tls: bool,
+    utf8_text: AtomicBool,
     username: Arc<Mutex<String>>,
     user_icon_id: Arc<Mutex<u16>>,
     status: Arc<Mutex<ConnectionStatus>>,
@@ -303,6 +304,7 @@ impl HotlineClient {
         Self {
             bookmark,
             allow_legacy_tls,
+            utf8_text: AtomicBool::new(false),
             username: Arc::new(Mutex::new("guest".to_string())),
             user_icon_id: Arc::new(Mutex::new(191)),
             status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
@@ -345,11 +347,23 @@ impl HotlineClient {
     /// Single source of truth — both the HOPE auth path and the legacy login path
     /// route through here. Provisional bits (currently bit 5) are never advertised.
     fn client_capability_bits(&self) -> u64 {
-        let mut bits = CAPABILITY_LARGE_FILES | CAPABILITY_CHAT_HISTORY | crate::protocol::constants::CAPABILITY_MODERN_DATES;
+        let mut bits = super::constants::CAPABILITY_TEXT_ENCODING | CAPABILITY_LARGE_FILES | CAPABILITY_CHAT_HISTORY | crate::protocol::constants::CAPABILITY_MODERN_DATES;
         if self.inline_media_enabled.load(Ordering::SeqCst) {
             bits |= CAPABILITY_INLINE_MEDIA;
         }
         bits
+    }
+
+    pub(crate) fn encoding(&self) -> TextEncoding {
+        if self.utf8_text.load(Ordering::SeqCst) { TextEncoding::Utf8 } else { TextEncoding::Macintosh }
+    }
+
+    fn text_field(&self, field_type: FieldType, value: &str) -> TransactionField {
+        TransactionField::from_string_with(field_type, value, self.encoding())
+    }
+
+    fn path_field(&self, field_type: FieldType, path: &[String]) -> TransactionField {
+        TransactionField::from_path_with(field_type, path, self.encoding())
     }
 
     /// True if the server confirmed CAPABILITY_INLINE_MEDIA (bit 3) for this session.
@@ -499,6 +513,7 @@ impl HotlineClient {
     }
 
     pub async fn connect(&self) -> Result<(), String> {
+        self.utf8_text.store(false, Ordering::SeqCst);
         let tls_label = if self.bookmark.tls { " (TLS)" } else { "" };
         println!("Connecting to {}:{}{tls_label}...", self.bookmark.address, self.bookmark.port);
 
@@ -1081,14 +1096,22 @@ impl HotlineClient {
 
         println!("Login reply: error_code={}, fields={}", login_reply.error_code, login_reply.fields.len());
 
+        let server_capabilities = login_reply
+            .get_field(FieldType::Capabilities)
+            .and_then(|f| f.to_capability_bits().ok())
+            .unwrap_or(0);
+
+        self.utf8_text.store(TextEncoding::negotiated(server_capabilities) == TextEncoding::Utf8, Ordering::SeqCst);
+        self.emit_protocol_log("info", format!("Session text encoding: {:?}", self.encoding()));
+
         // Check for error
         if login_reply.error_code != 0 {
             let server_text = login_reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok())
+                .and_then(|f| f.to_string_with(self.encoding()).ok())
                 .or_else(|| {
                     login_reply.get_field(FieldType::Data)
-                        .and_then(|f| f.to_string().ok())
+                        .and_then(|f| f.to_string_with(self.encoding()).ok())
                 });
             let error_msg = resolve_error_message(login_reply.error_code, server_text);
 
@@ -1096,7 +1119,7 @@ impl HotlineClient {
             for (i, field) in login_reply.fields.iter().enumerate() {
                 println!("  Field {}: type={:?} ({}), size={} bytes",
                     i, field.field_type, field.field_type as u16, field.data.len());
-                if let Ok(text) = field.to_string() {
+                if let Ok(text) = field.to_string_with(self.encoding()) {
                     if text.len() < 200 {
                         println!("    Text: {}", text);
                     }
@@ -1110,7 +1133,7 @@ impl HotlineClient {
         // ─── Process login reply (same as before) ───
         let server_name = login_reply
             .get_field(FieldType::ServerName)
-            .and_then(|f| f.to_string().ok())
+            .and_then(|f| f.to_string_with(self.encoding()).ok())
             .unwrap_or_else(|| self.bookmark.name.clone());
 
         let server_version = login_reply
@@ -1121,7 +1144,7 @@ impl HotlineClient {
 
         let server_description = login_reply
             .get_field(FieldType::Data)
-            .and_then(|f| f.to_string().ok())
+            .and_then(|f| f.to_string_with(self.encoding()).ok())
             .filter(|s| !s.is_empty() && s != &server_name)
             .unwrap_or_else(|| String::new());
 
@@ -1139,11 +1162,6 @@ impl HotlineClient {
         );
 
         println!("User access permissions: 0x{:016X}", user_access);
-
-        let server_capabilities = login_reply
-            .get_field(FieldType::Capabilities)
-            .and_then(|f| f.to_capability_bits().ok())
-            .unwrap_or(0);
 
         let large_files = (server_capabilities & CAPABILITY_LARGE_FILES) != 0;
         self.large_file_support.store(large_files, Ordering::SeqCst);
@@ -1219,6 +1237,11 @@ impl HotlineClient {
             let _ = self.event_tx.send(HotlineEvent::StatusChanged(ConnectionStatus::LoggedIn));
         }
 
+        // Login precedes encoding confirmation. Refresh the nickname once its
+        // encoding is known; otherwise modern servers can retain a MacRoman name.
+        if self.encoding() == TextEncoding::Utf8 && !username.is_ascii() {
+            self.send_set_client_user_info(&username, user_icon_id, None).await?;
+        }
         println!("Login successful!");
 
         Ok(())
@@ -1326,6 +1349,7 @@ impl HotlineClient {
 
         self.running.store(true, Ordering::SeqCst);
 
+        let encoding = self.encoding();
         let hope_reader = self.transport_reader.clone();
         let hope_writer = self.transport_writer.clone();
         let running = self.running.clone();
@@ -1425,7 +1449,7 @@ impl HotlineClient {
                     for field in &transaction.fields {
                         if field.field_type == FieldType::UserNameWithInfo {
                             has_user_info = true;
-                            if let Ok(user_info) = HotlineClient::parse_user_info(&field.data) {
+                            if let Ok(user_info) = HotlineClient::parse_user_info(&field.data, encoding) {
                                 println!("Parsed user: {} (ID: {}, Icon: {}, Flags: 0x{:04x})", user_info.1, user_info.0, user_info.2, user_info.3);
                                 let _ = event_tx.send(HotlineEvent::UserJoined {
                                     user_id: user_info.0,
@@ -1437,7 +1461,7 @@ impl HotlineClient {
                             }
                         } else if field.field_type == FieldType::FileNameWithInfo {
                             has_file_info = true;
-                            if let Ok(file_info) = HotlineClient::parse_file_info(&field.data) {
+                            if let Ok(file_info) = HotlineClient::parse_file_info(&field.data, encoding) {
                                 println!("Parsed file: {} ({} bytes, folder: {})",
                                     file_info.name, file_info.size, file_info.is_folder);
                                 files.push(file_info);
@@ -1540,7 +1564,7 @@ impl HotlineClient {
                         // print "Unhandled server event: UserAccess".
                         continue;
                     }
-                    Self::handle_server_event(&transaction, &event_tx);
+                    Self::handle_server_event(&transaction, &event_tx, encoding);
                 }
             }
 
@@ -1551,7 +1575,7 @@ impl HotlineClient {
         *receive_task = Some(task);
     }
 
-    fn handle_server_event(transaction: &Transaction, event_tx: &mpsc::UnboundedSender<HotlineEvent>) {
+    fn handle_server_event(transaction: &Transaction, event_tx: &mpsc::UnboundedSender<HotlineEvent>, encoding: TextEncoding) {
         match transaction.transaction_type {
             TransactionType::ChatMessage => {
                 // Extract chat message fields
@@ -1561,11 +1585,11 @@ impl HotlineClient {
                     .unwrap_or(0);
                 let mut user_name = transaction
                     .get_field(FieldType::UserName)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_default();
                 let mut message = transaction
                     .get_field(FieldType::Data)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_default();
 
                 // If the server didn't send a separate UserName field, parse it
@@ -1624,7 +1648,7 @@ impl HotlineClient {
             TransactionType::ServerMessage => {
                 let message = transaction
                     .get_field(FieldType::Data)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_default();
 
                 // Same invariant + extraction for PMs (104 carries inline media too)
@@ -1653,7 +1677,7 @@ impl HotlineClient {
                 // New message board post notification
                 let message = transaction
                     .get_field(FieldType::Data)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_default();
 
                 let _ = event_tx.send(HotlineEvent::NewMessageBoardPost(message));
@@ -1668,7 +1692,7 @@ impl HotlineClient {
                         i, field.field_type, field.field_type as u16, field.data.len());
                     if field.data.len() > 0 && field.data.len() <= 200 {
                         println!("    Data (hex): {:02X?}", &field.data);
-                        if let Ok(s) = field.to_string() {
+                        if let Ok(s) = field.to_string_with(encoding) {
                             println!("    Data (string, first 100 chars): {}", s.chars().take(100).collect::<String>());
                         }
                     }
@@ -1677,19 +1701,19 @@ impl HotlineClient {
                 // Try to get ServerAgreement field (type 150)
                 let agreement = if let Some(field) = transaction.get_field(FieldType::ServerAgreement) {
                     println!("Found ServerAgreement field (type 150), size: {} bytes", field.data.len());
-                    field.to_string().unwrap_or_default()
+                    field.to_string_with(encoding).unwrap_or_default()
                 } else {
                     // Maybe it's in the Data field (type 101)?
                     println!("ServerAgreement field not found, trying Data field...");
                     if let Some(field) = transaction.get_field(FieldType::Data) {
                         println!("Found Data field, size: {} bytes", field.data.len());
-                        field.to_string().unwrap_or_default()
+                        field.to_string_with(encoding).unwrap_or_default()
                     } else {
                         // Try the first field if it's a string
                         println!("Data field not found, trying first field...");
                         if let Some(field) = transaction.fields.first() {
                             println!("First field type: {:?}, size: {} bytes", field.field_type, field.data.len());
-                            field.to_string().unwrap_or_default()
+                            field.to_string_with(encoding).unwrap_or_default()
                         } else {
                             String::new()
                         }
@@ -1707,7 +1731,7 @@ impl HotlineClient {
                     .unwrap_or(0);
                 let user_name = transaction
                     .get_field(FieldType::UserName)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_default();
                 let icon = transaction
                     .get_field(FieldType::UserIconId)
@@ -1747,7 +1771,7 @@ impl HotlineClient {
             TransactionType::DisconnectMessage => {
                 let message = transaction
                     .get_field(FieldType::Data)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_else(|| "You have been disconnected.".to_string());
 
                 let _ = event_tx.send(HotlineEvent::DisconnectMessage(message));
@@ -1763,7 +1787,7 @@ impl HotlineClient {
                     .unwrap_or(0);
                 let user_name = transaction
                     .get_field(FieldType::UserName)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_default();
 
                 let _ = event_tx.send(HotlineEvent::ChatInvite { chat_id, user_id, user_name });
@@ -1779,7 +1803,7 @@ impl HotlineClient {
                     .unwrap_or(0);
                 let user_name = transaction
                     .get_field(FieldType::UserName)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_default();
                 let icon = transaction
                     .get_field(FieldType::UserIconId)
@@ -1818,7 +1842,7 @@ impl HotlineClient {
                     .unwrap_or(0);
                 let subject = transaction
                     .get_field(FieldType::ChatSubject)
-                    .and_then(|f| f.to_string().ok())
+                    .and_then(|f| f.to_string_with(encoding).ok())
                     .unwrap_or_default();
 
                 let _ = event_tx.send(HotlineEvent::ChatSubjectChanged { chat_id, subject });
@@ -1829,7 +1853,7 @@ impl HotlineClient {
                     .and_then(|f| f.to_u16().ok());
                 let url = transaction
                     .get_field(FieldType::ServerBannerUrl)
-                    .and_then(|f| f.to_string().ok());
+                    .and_then(|f| f.to_string_with(encoding).ok());
 
                 let _ = event_tx.send(HotlineEvent::ServerBannerUpdate { banner_type, url });
             }
@@ -2073,11 +2097,11 @@ mod tests {
     fn advertised_capabilities_match_implemented_features_and_preferences() {
         use crate::protocol::constants::*;
         let client = HotlineClient::new(test_tls_bookmark(5500), false);
-        let expected = CAPABILITY_LARGE_FILES | CAPABILITY_CHAT_HISTORY | CAPABILITY_MODERN_DATES;
+        let expected = CAPABILITY_TEXT_ENCODING | CAPABILITY_LARGE_FILES | CAPABILITY_CHAT_HISTORY | CAPABILITY_MODERN_DATES;
         assert_eq!(client.client_capability_bits(), expected | CAPABILITY_INLINE_MEDIA);
         client.set_inline_media_enabled(false);
         assert_eq!(client.client_capability_bits(), expected);
-        assert_eq!(client.client_capability_bits() & (CAPABILITY_EXTENDED_PRIV | CAPABILITY_TEXT_ENCODING | CAPABILITY_VOICE), 0);
+        assert_eq!(client.client_capability_bits() & (CAPABILITY_EXTENDED_PRIV | CAPABILITY_VOICE), 0);
     }
 
     fn test_tls_bookmark(port: u16) -> crate::protocol::types::Bookmark {
@@ -2494,5 +2518,94 @@ mod tests {
         assert_eq!(levels, ["info", "warn", "debug"], "logs: {:?}", access_logs);
 
         server.join().expect("server thread panicked").expect("server failed");
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    use crate::protocol::types::encode_text;
+
+    #[test]
+    fn embedded_names_and_live_chat_use_the_same_encoding() {
+        for (encoding, name) in [(TextEncoding::Macintosh, "√©"), (TextEncoding::Utf8, "日本語")] {
+            let bytes = encode_text(name, encoding);
+            let mut user = vec![0, 1, 0, 2, 0, 0];
+            user.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+            user.extend_from_slice(&bytes);
+            user.extend_from_slice(&0x00123456u32.to_be_bytes());
+            let parsed = HotlineClient::parse_user_info(&user, encoding).unwrap();
+            assert_eq!(parsed.1, name);
+            assert_eq!(parsed.4, Some(0x00123456));
+            let mut file = vec![0; 18];
+            file.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+            file.extend_from_slice(&bytes);
+            assert_eq!(HotlineClient::parse_file_info(&file, encoding).unwrap().name, name);
+            let mut chat = Transaction::new(1, TransactionType::ChatMessage);
+            chat.add_field(TransactionField::from_string_with(FieldType::UserName, name, encoding));
+            chat.add_field(TransactionField::from_string_with(FieldType::Data, name, encoding));
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            HotlineClient::handle_server_event(&chat, &tx, encoding);
+            match rx.try_recv().unwrap() {
+                HotlineEvent::ChatMessage { user_name, message, .. } => {
+                    assert_eq!(user_name, name);
+                    assert_eq!(message, name);
+                }
+                other => panic!("unexpected event: {:?}", other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn login_resolves_encoding_before_decoding_reply_text() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for encoding in [TextEncoding::Utf8, TextEncoding::Macintosh] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut handshake = [0; 12];
+                stream.read_exact(&mut handshake).await.unwrap();
+                stream.write_all(b"TRTP\0\0\0\0").await.unwrap();
+                let mut header = [0; 20];
+                stream.read_exact(&mut header).await.unwrap();
+                let size = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
+                let mut body = vec![0; size];
+                stream.read_exact(&mut body).await.unwrap();
+                let mut wire = header.to_vec();
+                wire.extend_from_slice(&body);
+                let request = Transaction::decode(&wire).unwrap();
+                assert_ne!(request.get_field(FieldType::Capabilities).unwrap().to_capability_bits().unwrap() & 2, 0);
+                let mut reply = Transaction::new(request.id, TransactionType::Login);
+                reply.is_reply = 1;
+                if encoding == TextEncoding::Utf8 {
+                    reply.add_field(TransactionField::from_u16(FieldType::Capabilities, 2));
+                }
+                reply.add_field(TransactionField::from_string_with(FieldType::ServerName, "café", encoding));
+                stream.write_all(&reply.encode()).await.unwrap();
+                if encoding == TextEncoding::Utf8 {
+                    stream.read_exact(&mut header).await.unwrap();
+                    let size = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
+                    let mut body = vec![0; size];
+                    stream.read_exact(&mut body).await.unwrap();
+                    let mut wire = header.to_vec();
+                    wire.extend_from_slice(&body);
+                    let update = Transaction::decode(&wire).unwrap();
+                    assert_eq!(update.transaction_type, TransactionType::SetClientUserInfo);
+                    assert_eq!(update.get_field(FieldType::UserName).unwrap().data, "日本語".as_bytes());
+                }
+            });
+            let bookmark = serde_json::from_value(serde_json::json!({
+                "id":"encoding-test", "name":"test", "address":"127.0.0.1", "port":port,
+                "login":"guest", "tls":false, "hope":false, "autoConnect":false
+            })).unwrap();
+            let client = HotlineClient::new(bookmark, false);
+            client.set_user_info("日本語".into(), 191).await;
+            client.establish_connection().await.unwrap();
+            client.login().await.unwrap();
+            assert_eq!(client.encoding(), encoding);
+            assert_eq!(client.get_server_info().await.unwrap().name, "café");
+            server.await.unwrap();
+        }
     }
 }

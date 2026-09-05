@@ -72,17 +72,17 @@ fn read_i64(data: &[u8], offset: usize) -> i64 {
     i64::from_be_bytes(buf)
 }
 
-/// History uses the same MacRoman encoding as this client's current sessions.
-/// UTF-8 capability is deliberately not advertised until all text paths support it.
-fn decode_text(data: &[u8]) -> String {
-    encoding_rs::MACINTOSH.decode(data).0.into_owned()
-}
+use super::types::{TextEncoding, decode_bytes};
 
 /// Parse a single `DATA_HISTORY_ENTRY` field's raw bytes into a `HistoryEntry`.
 ///
 /// Returns an error if the data is too short or has inconsistent length fields.
 /// Unknown mini-TLV sub-fields are silently skipped (forward compatibility).
 pub fn parse_history_entry(data: &[u8]) -> Result<HistoryEntry, String> {
+    parse_history_entry_with(data, TextEncoding::Macintosh)
+}
+
+pub fn parse_history_entry_with(data: &[u8], encoding: TextEncoding) -> Result<HistoryEntry, String> {
     let data_len = data.len();
 
     // Fixed header requires at least 22 bytes (before nick, which could be 0-length,
@@ -106,7 +106,7 @@ pub fn parse_history_entry(data: &[u8]) -> Result<HistoryEntry, String> {
         ));
     }
 
-    let nick = decode_text(&data[22..22 + nick_len]);
+    let nick = decode_bytes(&data[22..22 + nick_len], encoding);
     let msg_len = read_u16(data, 22 + nick_len) as usize;
 
     // Validate message fits
@@ -118,7 +118,7 @@ pub fn parse_history_entry(data: &[u8]) -> Result<HistoryEntry, String> {
         ));
     }
 
-    let message = decode_text(&data[24 + nick_len..24 + nick_len + msg_len]);
+    let message = decode_bytes(&data[24 + nick_len..24 + nick_len + msg_len], encoding);
 
     // Optional sub-fields after the message body — skip all (no types defined in v1).
     // We parse them only to validate structure; a future version could extract known types.
@@ -152,6 +152,15 @@ mod tests {
         let entry = parse_history_entry(&data).unwrap();
         assert_eq!(entry.nick, "Renée");
         assert_eq!(entry.message, "Café");
+    }
+
+    #[test]
+    fn history_decodes_utf8_and_normalizes_newlines() {
+        let data = build_entry(u64::MAX, 100, 0, 1, "日本語".as_bytes(), "café\r\nこんにちは".as_bytes());
+        let entry = parse_history_entry_with(&data, TextEncoding::Utf8).unwrap();
+        assert_eq!(entry.nick, "日本語");
+        assert_eq!(entry.message, "café\nこんにちは");
+        assert_eq!(entry.message_id, u64::MAX.to_string());
     }
 
     /// Build a minimal history entry for testing.

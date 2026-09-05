@@ -1,3 +1,4 @@
+use crate::protocol::types::{TextEncoding, decode_bytes, encode_text};
 // File management functionality for Hotline client
 
 use super::{BoxedRead, BoxedWrite, FileInfo, HotlineClient};
@@ -19,47 +20,11 @@ use tokio::sync::mpsc;
 // also AEAD-encrypted with per-transfer derived keys. The HTXF handshake is
 // always plaintext; AEAD framing begins immediately after the handshake.
 
-/// Encode a UTF-8 folder name to bytes suitable for the Hotline FilePath field.
-/// Tries MacRoman encoding first (which is what the protocol uses natively).
-/// Falls back to raw UTF-8 bytes if MacRoman can't represent the characters.
-fn encode_path_component(name: &str) -> Vec<u8> {
-    let (encoded, _encoding, had_unmappable) = encoding_rs::MACINTOSH.encode(name);
-    if had_unmappable {
-        // Characters that can't be represented in MacRoman — send as UTF-8
-        // (modern servers like Mobius handle UTF-8)
-        name.as_bytes().to_vec()
-    } else {
-        encoded.into_owned()
+/// Build the FilePath payload with the connection's negotiated encoding.
+fn encode_file_path(path: &[String], encoding: TextEncoding) -> Option<Vec<u8>> {
+    if path.is_empty() { None } else {
+        Some(TransactionField::from_path_with(FieldType::FilePath, path, encoding).data)
     }
-}
-
-/// Build the binary FilePath field data from a path component list.
-/// Returns None if path is empty (no field needed).
-fn encode_file_path(path: &[String]) -> Option<Vec<u8>> {
-    if path.is_empty() {
-        return None;
-    }
-
-    let mut path_data = Vec::new();
-    path_data.extend_from_slice(&(path.len() as u16).to_be_bytes());
-
-    for folder in path {
-        let folder_bytes = encode_path_component(folder);
-        if folder_bytes.len() > 255 {
-            // Protocol only supports 1-byte length — truncate to 255 bytes
-            // (this matches the protocol spec limit)
-            let truncated = &folder_bytes[..255];
-            path_data.extend_from_slice(&[0x00, 0x00]);
-            path_data.push(255u8);
-            path_data.extend_from_slice(truncated);
-        } else {
-            path_data.extend_from_slice(&[0x00, 0x00]);
-            path_data.push(folder_bytes.len() as u8);
-            path_data.extend_from_slice(&folder_bytes);
-        }
-    }
-
-    Some(path_data)
 }
 
 impl HotlineClient {
@@ -121,7 +86,7 @@ impl HotlineClient {
         }
 
         // Encode path as FilePath field
-        if let Some(path_data) = encode_file_path(&path) {
+        if let Some(path_data) = encode_file_path(&path, self.encoding()) {
             println!("Path data encoded ({} bytes): {:02X?}", path_data.len(), path_data);
             transaction.add_field(TransactionField {
                 field_type: FieldType::FilePath,
@@ -143,10 +108,10 @@ impl HotlineClient {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::DownloadFile);
 
         // Add FileName field
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
+        transaction.add_field(self.text_field(FieldType::FileName, &file_name));
 
         // Add FilePath field if not at root
-        if let Some(path_data) = encode_file_path(&path) {
+        if let Some(path_data) = encode_file_path(&path, self.encoding()) {
             transaction.add_field(TransactionField {
                 field_type: FieldType::FilePath,
                 data: path_data,
@@ -196,7 +161,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             return Err(format!("Download failed: {}", error_msg));
         }
@@ -548,7 +513,7 @@ impl HotlineClient {
         Ok(file_data)
     }
 
-    pub(crate) fn parse_file_info(data: &[u8]) -> Result<FileInfo, String> {
+    pub(crate) fn parse_file_info(data: &[u8], encoding: TextEncoding) -> Result<FileInfo, String> {
         // FileNameWithInfo format:
         // 4 bytes: File type (4-char code)
         // 4 bytes: Creator (4-char code)
@@ -573,7 +538,7 @@ impl HotlineClient {
             return Err(format!("FileNameWithInfo name data too short: have {} bytes, need {}", data.len(), 20 + name_len));
         }
 
-        let name = String::from_utf8_lossy(&data[20..20 + name_len]).to_string();
+        let name = decode_bytes(&data[20..20 + name_len], encoding);
 
         // Folders have file type "fldr"
         let is_folder = file_type.trim() == "fldr";
@@ -616,7 +581,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             return Err(format!("Banner download failed: {}", error_msg));
         }
@@ -723,11 +688,11 @@ impl HotlineClient {
         // Add file name field
         transaction.add_field(TransactionField {
             field_type: FieldType::FileName,
-            data: file_name.as_bytes().to_vec(),
+            data: encode_text(&file_name, self.encoding()),
         });
 
         // Add file path field if not root
-        if let Some(path_data) = encode_file_path(&path) {
+        if let Some(path_data) = encode_file_path(&path, self.encoding()) {
             transaction.add_field(TransactionField {
                 field_type: FieldType::FilePath,
                 data: path_data,
@@ -757,7 +722,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             return Err(format!("Upload failed: {}", error_msg));
         }
@@ -786,11 +751,11 @@ impl HotlineClient {
         // Add folder name
         transaction.add_field(TransactionField {
             field_type: FieldType::FileName,
-            data: name.as_bytes().to_vec(),
+            data: encode_text(&name, self.encoding()),
         });
 
         // Add path field if not at root
-        if let Some(path_data) = encode_file_path(&path) {
+        if let Some(path_data) = encode_file_path(&path, self.encoding()) {
             transaction.add_field(TransactionField {
                 field_type: FieldType::FilePath,
                 data: path_data,
@@ -813,7 +778,7 @@ impl HotlineClient {
         if reply.error_code != 0 {
             let server_text = reply
                 .get_field(FieldType::ErrorText)
-                .and_then(|f| f.to_string().ok());
+                .and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             return Err(format!("Create folder failed: {}", error_msg));
         }
@@ -972,10 +937,10 @@ impl HotlineClient {
     /// Delete a file or folder on the server
     pub async fn delete_file(&self, path: Vec<String>, file_name: String) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::DeleteFile);
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
+        transaction.add_field(self.text_field(FieldType::FileName, &file_name));
 
         if !path.is_empty() {
-            if let Some(path_data) = encode_file_path(&path) {
+            if let Some(path_data) = encode_file_path(&path, self.encoding()) {
                 transaction.add_field(TransactionField::new(FieldType::FilePath, path_data));
             }
         }
@@ -992,7 +957,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Delete failed: {}", error_msg));
                 }
@@ -1014,15 +979,15 @@ impl HotlineClient {
     /// Move a file or folder to a new location on the server
     pub async fn move_file(&self, path: Vec<String>, file_name: String, new_path: Vec<String>) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::MoveFile);
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
+        transaction.add_field(self.text_field(FieldType::FileName, &file_name));
 
         if !path.is_empty() {
-            if let Some(path_data) = encode_file_path(&path) {
+            if let Some(path_data) = encode_file_path(&path, self.encoding()) {
                 transaction.add_field(TransactionField::new(FieldType::FilePath, path_data));
             }
         }
 
-        if let Some(new_path_data) = encode_file_path(&new_path) {
+        if let Some(new_path_data) = encode_file_path(&new_path, self.encoding()) {
             transaction.add_field(TransactionField::new(FieldType::FileNewPath, new_path_data));
         }
 
@@ -1038,7 +1003,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Move failed: {}", error_msg));
                 }
@@ -1060,10 +1025,10 @@ impl HotlineClient {
     /// Get file info from the server
     pub async fn get_file_info(&self, path: Vec<String>, file_name: String) -> Result<FileInfoDetails, String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::GetFileInfo);
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
+        transaction.add_field(self.text_field(FieldType::FileName, &file_name));
 
         if !path.is_empty() {
-            if let Some(path_data) = encode_file_path(&path) {
+            if let Some(path_data) = encode_file_path(&path, self.encoding()) {
                 transaction.add_field(TransactionField::new(FieldType::FilePath, path_data));
             }
         }
@@ -1092,16 +1057,16 @@ impl HotlineClient {
         };
 
         if reply.error_code != 0 {
-            let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+            let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
             let error_msg = resolve_error_message(reply.error_code, server_text);
             return Err(format!("Get file info failed: {}", error_msg));
         }
 
-        let file_name = reply.get_field(FieldType::FileName).and_then(|f| f.to_string().ok()).unwrap_or_default();
-        let file_type = reply.get_field(FieldType::FileTypeString).and_then(|f| f.to_string().ok()).unwrap_or_default();
-        let creator = reply.get_field(FieldType::FileCreatorString).and_then(|f| f.to_string().ok()).unwrap_or_default();
+        let file_name = reply.get_field(FieldType::FileName).and_then(|f| f.to_string_with(self.encoding()).ok()).unwrap_or_default();
+        let file_type = reply.get_field(FieldType::FileTypeString).and_then(|f| f.to_string_with(self.encoding()).ok()).unwrap_or_default();
+        let creator = reply.get_field(FieldType::FileCreatorString).and_then(|f| f.to_string_with(self.encoding()).ok()).unwrap_or_default();
         let file_size = read_extended_size(&reply, FieldType::FileSize64, FieldType::FileSize).unwrap_or(0);
-        let comment = reply.get_field(FieldType::FileComment).and_then(|f| f.to_string().ok()).unwrap_or_default();
+        let comment = reply.get_field(FieldType::FileComment).and_then(|f| f.to_string_with(self.encoding()).ok()).unwrap_or_default();
         let create_date = reply.get_field(FieldType::FileCreateDate).and_then(|f| crate::protocol::dates::decode_date_field(&f.data));
         let modify_date = reply.get_field(FieldType::FileModifyDate).and_then(|f| crate::protocol::dates::decode_date_field(&f.data));
 
@@ -1119,20 +1084,20 @@ impl HotlineClient {
     /// Set file info (rename or update comment)
     pub async fn set_file_info(&self, path: Vec<String>, file_name: String, new_name: Option<String>, comment: Option<String>) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::SetFileInfo);
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
+        transaction.add_field(self.text_field(FieldType::FileName, &file_name));
 
         if !path.is_empty() {
-            if let Some(path_data) = encode_file_path(&path) {
+            if let Some(path_data) = encode_file_path(&path, self.encoding()) {
                 transaction.add_field(TransactionField::new(FieldType::FilePath, path_data));
             }
         }
 
         if let Some(name) = new_name {
-            transaction.add_field(TransactionField::from_string(FieldType::FileNewName, &name));
+            transaction.add_field(self.text_field(FieldType::FileNewName, &name));
         }
 
         if let Some(cmt) = comment {
-            transaction.add_field(TransactionField::from_string(FieldType::FileComment, &cmt));
+            transaction.add_field(self.text_field(FieldType::FileComment, &cmt));
         }
 
         let transaction_id = transaction.id;
@@ -1147,7 +1112,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Set file info failed: {}", error_msg));
                 }
@@ -1169,15 +1134,15 @@ impl HotlineClient {
     /// Create a file alias (shortcut) on the server
     pub async fn make_file_alias(&self, path: Vec<String>, file_name: String, new_path: Vec<String>) -> Result<(), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::MakeFileAlias);
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
+        transaction.add_field(self.text_field(FieldType::FileName, &file_name));
 
         if !path.is_empty() {
-            if let Some(path_data) = encode_file_path(&path) {
+            if let Some(path_data) = encode_file_path(&path, self.encoding()) {
                 transaction.add_field(TransactionField::new(FieldType::FilePath, path_data));
             }
         }
 
-        if let Some(new_path_data) = encode_file_path(&new_path) {
+        if let Some(new_path_data) = encode_file_path(&new_path, self.encoding()) {
             transaction.add_field(TransactionField::new(FieldType::FileNewPath, new_path_data));
         }
 
@@ -1193,7 +1158,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Make alias failed: {}", error_msg));
                 }
@@ -1229,7 +1194,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Download info failed: {}", error_msg));
                 }
@@ -1255,10 +1220,10 @@ impl HotlineClient {
     /// Download an entire folder from the server
     pub async fn download_folder(&self, path: Vec<String>, file_name: String) -> Result<(u32, u64, u64), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::DownloadFolder);
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
+        transaction.add_field(self.text_field(FieldType::FileName, &file_name));
 
         if !path.is_empty() {
-            if let Some(path_data) = encode_file_path(&path) {
+            if let Some(path_data) = encode_file_path(&path, self.encoding()) {
                 transaction.add_field(TransactionField::new(FieldType::FilePath, path_data));
             }
         }
@@ -1275,7 +1240,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Download folder failed: {}", error_msg));
                 }
@@ -1305,7 +1270,7 @@ impl HotlineClient {
     /// Upload an entire folder to the server
     pub async fn upload_folder(&self, path: Vec<String>, file_name: String, item_count: u64) -> Result<u32, String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::UploadFolder);
-        transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
+        transaction.add_field(self.text_field(FieldType::FileName, &file_name));
         if self.large_file_support.load(Ordering::SeqCst) {
             transaction.add_field(TransactionField::from_u64(FieldType::FolderItemCount64, item_count));
         } else if item_count > u16::MAX as u64 {
@@ -1314,7 +1279,7 @@ impl HotlineClient {
         transaction.add_field(TransactionField::from_u16(FieldType::FolderItemCount, item_count.min(u16::MAX as u64) as u16));
 
         if !path.is_empty() {
-            if let Some(path_data) = encode_file_path(&path) {
+            if let Some(path_data) = encode_file_path(&path, self.encoding()) {
                 transaction.add_field(TransactionField::new(FieldType::FilePath, path_data));
             }
         }
@@ -1331,7 +1296,7 @@ impl HotlineClient {
         match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
             Ok(Some(reply)) => {
                 if reply.error_code != 0 {
-                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string().ok());
+                    let server_text = reply.get_field(FieldType::ErrorText).and_then(|f| f.to_string_with(self.encoding()).ok());
                     let error_msg = resolve_error_message(reply.error_code, server_text);
                     return Err(format!("Upload folder failed: {}", error_msg));
                 }
@@ -1357,6 +1322,7 @@ impl HotlineClient {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::types::{TextEncoding, encode_text};
     use super::HotlineClient;
     use openssl::asn1::Asn1Time;
     use openssl::bn::BigNum;
@@ -1506,7 +1472,7 @@ mod tests {
     fn encode_file_path_exact_wire_layout() {
         // count(2) then per component: 0x00 0x00 + len(1) + bytes
         let path = vec!["abc".to_string(), "de".to_string()];
-        let encoded = super::encode_file_path(&path).expect("non-empty path");
+        let encoded = super::encode_file_path(&path, TextEncoding::Macintosh).expect("non-empty path");
         let expected: Vec<u8> = vec![
             0x00, 0x02, // component count
             0x00, 0x00, 0x03, b'a', b'b', b'c',
@@ -1517,13 +1483,13 @@ mod tests {
 
     #[test]
     fn encode_file_path_empty_is_none() {
-        assert_eq!(super::encode_file_path(&[]), None);
+        assert_eq!(super::encode_file_path(&[], TextEncoding::Macintosh), None);
     }
 
     #[test]
     fn encode_file_path_truncates_components_to_255_bytes() {
         let long = "x".repeat(300);
-        let encoded = super::encode_file_path(&[long]).expect("non-empty path");
+        let encoded = super::encode_file_path(&[long], TextEncoding::Macintosh).expect("non-empty path");
         assert_eq!(&encoded[0..2], &[0x00, 0x01]); // count
         assert_eq!(encoded[4], 255); // 1-byte length capped
         assert_eq!(encoded.len(), 2 + 3 + 255);
@@ -1532,9 +1498,9 @@ mod tests {
     #[test]
     fn encode_path_component_prefers_macroman() {
         // é is representable in MacRoman as 0x8E
-        assert_eq!(super::encode_path_component("é"), vec![0x8E]);
+        assert_eq!(encode_text("é", TextEncoding::Macintosh), vec![0x8E]);
         // Unmappable characters fall back to raw UTF-8
-        assert_eq!(super::encode_path_component("→"), "→".as_bytes().to_vec());
+        assert_eq!(encode_text("→", TextEncoding::Utf8), "→".as_bytes().to_vec());
     }
 
     // ─── HTXF download / flattened FILP parsing ───────────────────────────
