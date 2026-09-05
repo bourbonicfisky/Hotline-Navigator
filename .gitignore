@@ -38,3 +38,6 @@ IDEWorkspaceSharedSettings.plist
 
 # iOS
 *.ipa
+
+# Keep application Rust dependencies reproducible.
+!hotline-tauri/src-tauri/Cargo.lock

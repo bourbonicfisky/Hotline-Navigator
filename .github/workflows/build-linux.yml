@@ -42,6 +42,22 @@ jobs:
         with:
           ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
+      # Older release tags did not track Cargo.lock. Use the workflow commit's
+      # verified lockfile for those tags instead of resolving newer dependencies.
+      - name: Checkout dependency lock for older tags
+        if: hashFiles('hotline-tauri/src-tauri/Cargo.lock') == ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: build-dependencies
+          sparse-checkout: hotline-tauri/src-tauri/Cargo.lock
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Restore dependency lock for older tags
+        if: hashFiles('hotline-tauri/src-tauri/Cargo.lock') == ''
+        run: cp build-dependencies/hotline-tauri/src-tauri/Cargo.lock hotline-tauri/src-tauri/Cargo.lock
+
       - name: Validate release version
         if: env.RELEASE_TAG != ''
         working-directory: hotline-tauri
@@ -90,11 +106,11 @@ jobs:
 
       - name: Test Rust
         working-directory: hotline-tauri/src-tauri
-        run: cargo test --lib
+        run: cargo test --locked --lib
 
       - name: Build Debian and AppImage packages
         working-directory: hotline-tauri
-        run: npx tauri build --bundles deb,appimage
+        run: npx tauri build --bundles deb,appimage -- --locked
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
