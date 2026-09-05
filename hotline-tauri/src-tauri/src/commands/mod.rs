@@ -1475,3 +1475,10 @@ mod preview_security_tests {
 pub async fn discover_server(address: String, port: u16) -> Result<crate::protocol::discovery::Descriptor, String> {
     crate::protocol::discovery::discover(&address, port).await
 }
+
+#[tauri::command]
+pub async fn get_gif_icons(server_id: String, state: State<'_, AppState>) -> Result<Vec<crate::protocol::client::avatars::GifIcon>, String> { state.get_gif_icons(&server_id).await }
+#[tauri::command]
+pub async fn get_gif_icon(server_id: String, user_id: u16, state: State<'_, AppState>) -> Result<crate::protocol::client::avatars::GifIcon, String> { state.get_gif_icon(&server_id, user_id).await }
+#[tauri::command]
+pub async fn set_gif_icon(server_id: String, bytes: Vec<u8>, state: State<'_, AppState>) -> Result<(), String> { state.set_gif_icon(&server_id, bytes).await }

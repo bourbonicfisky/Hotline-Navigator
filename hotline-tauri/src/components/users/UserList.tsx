@@ -1,3 +1,4 @@
+import GifAvatarControls from './GifAvatarControls';
 import UserIcon, { UserBanner } from './UserIcon';
 import { isIconBlocked } from '../../utils/iconBlocklist';
 import { getDisplayColor } from '../../utils/displayColor';
@@ -15,6 +16,7 @@ interface User {
 }
 
 interface UserListProps {
+  serverId: string;
   users: User[];
   unreadCounts: Map<number, number>;
   onUserClick: (user: User) => void;
@@ -22,7 +24,7 @@ interface UserListProps {
   onOpenMessageDialog?: (user: User) => void;
 }
 
-export default function UserList({ users, unreadCounts, onUserClick, onUserRightClick }: UserListProps) {
+export default function UserList({ serverId, users, unreadCounts, onUserClick, onUserRightClick }: UserListProps) {
   const themeBg = useThemeBackground();
   const displayUserColors = usePreferencesStore((s) => s.displayUserColors);
   const enforceColorLegibility = usePreferencesStore((s) => s.enforceColorLegibility);
@@ -33,6 +35,7 @@ export default function UserList({ users, unreadCounts, onUserClick, onUserRight
       <h2 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-2 px-2">
         Users ({users.length})
       </h2>
+      <GifAvatarControls serverId={serverId} />
       <div className="space-y-1">
         {users.map((user) => {
           const displayColor = user.isIdle ? undefined : getDisplayColor(user.color, themeBg, colorPrefs);
@@ -52,7 +55,7 @@ export default function UserList({ users, unreadCounts, onUserClick, onUserRight
             title={`Click to message${user.isAdmin ? ' (Admin)' : ''}${user.isIdle ? ' (Idle)' : ''} | Right-click for menu`}
           >
             {!isIconBlocked(user.iconId) && <UserBanner iconId={user.iconId} />}
-            <UserIcon iconId={user.iconId} size={16} />
+            <UserIcon serverId={serverId} userId={user.userId} iconId={user.iconId} size={16} />
             <span className={`truncate flex-1 ${user.isIdle ? 'italic' : ''}`}>
               {user.userName}
               {isIconBlocked(user.iconId) && (

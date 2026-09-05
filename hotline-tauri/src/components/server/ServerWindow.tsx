@@ -1,3 +1,4 @@
+import { useGifAvatars } from '../users/useGifAvatars';
 import type { UploadedMedia } from '../chat/useChatAttachment';
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -89,6 +90,7 @@ export default function ServerWindow({ serverId, serverName, onClose }: ServerWi
   const [bannerUrl, setBannerUrl] = useState<string | null>(null);
   const [serverInfo, setServerInfo] = useState<ServerInfo | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
+  useGifAvatars(serverId, connectionStatus === 'logged-in');
 
   // Server-side chat history state
   const oldestHistoryIdRef = useRef<string | null>(null);
@@ -1017,6 +1019,7 @@ export default function ServerWindow({ serverId, serverName, onClose }: ServerWi
 
       {/* Mobile section tabs (above content on mobile) */}
       <MobileTabBar
+            serverId={serverId}
         activeTab={activeTab}
         onTabChange={setActiveTab}
         users={users}
@@ -1261,6 +1264,7 @@ export default function ServerWindow({ serverId, serverName, onClose }: ServerWi
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
         <ServerSidebar
+            serverId={serverId}
           activeTab={activeTab}
           onTabChange={setActiveTab}
           users={users}

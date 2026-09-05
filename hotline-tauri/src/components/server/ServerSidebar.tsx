@@ -2,6 +2,7 @@ import UserList from '../users/UserList';
 import type { ViewTab, User, PrivateChatRoom } from '../server/serverTypes';
 
 interface ServerSidebarProps {
+  serverId: string;
   activeTab: ViewTab;
   onTabChange: (tab: ViewTab) => void;
   users: User[];
@@ -14,6 +15,7 @@ interface ServerSidebarProps {
 }
 
 export default function ServerSidebar({
+  serverId,
   activeTab,
   onTabChange,
   users,
@@ -145,6 +147,7 @@ export default function ServerSidebar({
       {/* User list */}
       <div className="flex-1 overflow-y-auto">
         <UserList
+          serverId={serverId}
           users={users}
           onUserClick={onUserClick}
           onUserRightClick={onUserRightClick}

@@ -251,7 +251,7 @@ export default function DiscordChatRenderer({ serverId, messages, users, formatT
             {/* User icon */}
             <div className="flex-shrink-0 w-10 pt-0.5">
               {group.iconId != null ? (
-                <UserIcon iconId={group.iconId} size={32} className="rounded" />
+                <UserIcon serverId={serverId} userId={group.userId} iconId={group.iconId} size={32} className="rounded" />
               ) : (
                 <div className="w-8 h-8 rounded bg-gray-300 dark:bg-gray-600 flex items-center justify-center text-xs text-gray-500 dark:text-gray-400">
                   {group.userName.charAt(0).toUpperCase()}

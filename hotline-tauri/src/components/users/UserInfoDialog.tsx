@@ -58,7 +58,7 @@ export default function UserInfoDialog({ user, serverId, onClose, onSendMessage,
         <div className="p-6 space-y-4">
           {/* User Icon */}
           <div className="flex justify-center">
-            <UserIcon iconId={user.iconId} size={64} className="rounded-lg" />
+            <UserIcon serverId={serverId} userId={user.userId} iconId={user.iconId} size={64} className="rounded-lg" />
           </div>
 
           {/* User Details */}

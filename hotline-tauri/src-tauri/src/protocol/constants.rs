@@ -203,6 +203,10 @@ pub const HTXF_FLAG_RESUME: u32 = 0x00000004;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum TransactionType {
+    GetGifIconList = 1861,
+    SetGifIcon = 1862,
+    GetGifIcon = 1863,
+    GifIconChanged = 1864,
     Reply = 0,
     Error = 100,
     GetMessageBoard = 101,
@@ -280,6 +284,10 @@ impl From<u16> for TransactionType {
             104 => Self::ServerMessage,
             105 => Self::SendChat,
             106 => Self::ChatMessage,
+            1861 => Self::GetGifIconList,
+            1862 => Self::SetGifIcon,
+            1863 => Self::GetGifIcon,
+            1864 => Self::GifIconChanged,
             107 => Self::Login,
             108 => Self::SendInstantMessage,
             109 => Self::ShowAgreement,
@@ -343,6 +351,8 @@ impl From<u16> for TransactionType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum FieldType {
+    GifIconData = 768,
+    GifIconListEntry = 769,
     ErrorText = 100,
     Data = 101,
     UserName = 102,
@@ -521,6 +531,8 @@ impl From<u16> for FieldType {
             335 => Self::NewsArticleParentArticle,
             336 => Self::NewsArticleFirstChildArticle,
             337 => Self::NewsArticleRecursiveDelete,
+            768 => Self::GifIconData,
+            769 => Self::GifIconListEntry,
             496 => Self::Capabilities,
             497 => Self::FileSize64,
             506 => Self::PartialDigest,

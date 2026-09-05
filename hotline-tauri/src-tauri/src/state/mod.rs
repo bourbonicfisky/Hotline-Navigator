@@ -295,6 +295,9 @@ impl AppState {
                 use crate::protocol::client::HotlineEvent;
 
                 match event {
+                    HotlineEvent::GifIconChanged { user_id } => {
+                        let _ = app_handle.emit(&format!("gif-icon-changed-{}", server_id_clone), serde_json::json!({"userId": user_id}));
+                    }
                     HotlineEvent::ChatMessage { user_id, user_name, message, media } => {
                         let payload = serde_json::json!({
                             "userId": user_id,
@@ -959,6 +962,19 @@ impl AppState {
         } else {
             Err("Server not connected".to_string())
         }
+    }
+
+    pub async fn get_gif_icons(&self, server_id: &str) -> Result<Vec<crate::protocol::client::avatars::GifIcon>, String> {
+        let clients = self.clients.read().await;
+        clients.get(server_id).ok_or("Server not connected")?.get_gif_icons().await
+    }
+    pub async fn get_gif_icon(&self, server_id: &str, user_id: u16) -> Result<crate::protocol::client::avatars::GifIcon, String> {
+        let clients = self.clients.read().await;
+        clients.get(server_id).ok_or("Server not connected")?.get_gif_icon(user_id).await
+    }
+    pub async fn set_gif_icon(&self, server_id: &str, bytes: Vec<u8>) -> Result<(), String> {
+        let clients = self.clients.read().await;
+        clients.get(server_id).ok_or("Server not connected")?.set_gif_icon(bytes).await
     }
 
     pub async fn get_bookmarks(&self) -> Result<Vec<Bookmark>, String> {

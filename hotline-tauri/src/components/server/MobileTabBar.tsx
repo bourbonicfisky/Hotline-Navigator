@@ -3,6 +3,7 @@ import UserList from '../users/UserList';
 import type { ViewTab, User } from '../server/serverTypes';
 
 interface MobileTabBarProps {
+  serverId: string;
   activeTab: ViewTab;
   onTabChange: (tab: ViewTab) => void;
   users: User[];
@@ -20,6 +21,7 @@ const tabs: { id: ViewTab; label: string; icon: string }[] = [
 ];
 
 export default function MobileTabBar({
+  serverId,
   activeTab,
   onTabChange,
   users,
@@ -84,6 +86,7 @@ export default function MobileTabBar({
       {showUsers && (
         <div className="border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 max-h-[40vh] overflow-y-auto">
           <UserList
+          serverId={serverId}
             users={users}
             onUserClick={(user) => {
               onUserClick(user);

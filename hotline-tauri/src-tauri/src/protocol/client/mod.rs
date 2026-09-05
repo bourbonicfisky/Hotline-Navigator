@@ -9,6 +9,7 @@ pub(crate) mod media;
 mod news;
 mod transfer_io;
 mod folders;
+pub(crate) mod avatars;
 pub(crate) mod users;
 
 use super::constants::{
@@ -161,6 +162,7 @@ impl ServerCertVerifier for NoVerifier {
 // Event types that can be received from the server
 #[derive(Debug, Clone)]
 pub enum HotlineEvent {
+    GifIconChanged { user_id: u16 },
     ChatMessage {
         user_id: u16,
         user_name: String,
@@ -1583,6 +1585,11 @@ impl HotlineClient {
 
     fn handle_server_event(transaction: &Transaction, event_tx: &mpsc::UnboundedSender<HotlineEvent>, encoding: TextEncoding) {
         match transaction.transaction_type {
+            TransactionType::GifIconChanged => {
+                if let Some(user_id) = transaction.get_field(FieldType::UserId).and_then(|f| f.to_u16().ok()) {
+                    let _ = event_tx.send(HotlineEvent::GifIconChanged { user_id });
+                }
+            }
             TransactionType::ChatMessage => {
                 // Extract chat message fields
                 let user_id = transaction

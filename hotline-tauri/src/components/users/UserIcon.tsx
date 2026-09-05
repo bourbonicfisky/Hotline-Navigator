@@ -1,14 +1,20 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useAvatarStore } from '../../stores/avatarStore';
 import { usePreferencesStore } from '../../stores/preferencesStore';
 import { isIconBlocked } from '../../utils/iconBlocklist';
 
 interface UserIconProps {
+  serverId?: string;
+  userId?: number;
   iconId: number;
   size?: number;
   className?: string;
 }
 
-export default function UserIcon({ iconId, size = 16, className = '' }: UserIconProps) {
+export default function UserIcon({ iconId, serverId, userId, size = 16, className = '' }: UserIconProps) {
+  const avatar = useAvatarStore(state => serverId && userId !== undefined ? state.icons[serverId]?.[userId] : undefined);
+  const [avatarError, setAvatarError] = useState(false);
+  useEffect(() => { setAvatarError(false); setLocalError(false); setRemoteError(false); setIsBanner(false); }, [iconId, avatar]);
   const [localError, setLocalError] = useState(false);
   const [remoteError, setRemoteError] = useState(false);
   const [isBanner, setIsBanner] = useState(false);
@@ -25,6 +31,9 @@ export default function UserIcon({ iconId, size = 16, className = '' }: UserIcon
       </div>
     );
   }
+
+  if (avatar && !avatarError) return <img src={avatar} alt="Custom avatar" width={size} height={size}
+    className={`object-contain ${className}`} style={{ width: size, height: size }} onError={() => setAvatarError(true)} />;
 
   const localPath = `/icons/classic/${iconId}.png`;
   const remotePath = `https://hlwiki.com/ik0ns/${iconId}.png`;
