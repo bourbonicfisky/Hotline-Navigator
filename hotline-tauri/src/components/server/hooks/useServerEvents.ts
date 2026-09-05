@@ -625,12 +625,12 @@ export function useServerEvents({
     
     let isActive = true;
     
-    const unlistenPromise = listen<{ userId: number; message: string }>(
+    const unlistenPromise = listen<{ userId: number; message: string; media?: WireMedia | null }>(
       `private-message-${serverId}`,
       (event) => {
         if (!isActive) return;
         
-        const { userId, message } = event.payload;
+        const { userId, message, media } = event.payload;
         log('Chat', 'Private message received', { userId, message });
 
         soundsRef.current.playPrivateMessageSound();
@@ -669,6 +669,7 @@ export function useServerEvents({
             ...userMessages,
             {
               text: message,
+              media: wireMediaToChatMedia(media),
               isOutgoing: false,
               timestamp: new Date(),
             },

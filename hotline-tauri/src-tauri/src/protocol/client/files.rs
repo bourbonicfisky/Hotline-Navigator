@@ -1100,10 +1100,10 @@ impl HotlineClient {
         let file_name = reply.get_field(FieldType::FileName).and_then(|f| f.to_string().ok()).unwrap_or_default();
         let file_type = reply.get_field(FieldType::FileTypeString).and_then(|f| f.to_string().ok()).unwrap_or_default();
         let creator = reply.get_field(FieldType::FileCreatorString).and_then(|f| f.to_string().ok()).unwrap_or_default();
-        let file_size = reply.get_field(FieldType::FileSize).and_then(|f| f.to_u32().ok()).unwrap_or(0) as u64;
+        let file_size = read_extended_size(&reply, FieldType::FileSize64, FieldType::FileSize).unwrap_or(0);
         let comment = reply.get_field(FieldType::FileComment).and_then(|f| f.to_string().ok()).unwrap_or_default();
-        let create_date = reply.get_field(FieldType::FileCreateDate).and_then(|f| f.to_u32().ok()).unwrap_or(0);
-        let modify_date = reply.get_field(FieldType::FileModifyDate).and_then(|f| f.to_u32().ok()).unwrap_or(0);
+        let create_date = reply.get_field(FieldType::FileCreateDate).and_then(|f| crate::protocol::dates::decode_date_field(&f.data));
+        let modify_date = reply.get_field(FieldType::FileModifyDate).and_then(|f| crate::protocol::dates::decode_date_field(&f.data));
 
         Ok(FileInfoDetails {
             file_name,
@@ -1253,7 +1253,7 @@ impl HotlineClient {
     }
 
     /// Download an entire folder from the server
-    pub async fn download_folder(&self, path: Vec<String>, file_name: String) -> Result<(u32, u32, u32), String> {
+    pub async fn download_folder(&self, path: Vec<String>, file_name: String) -> Result<(u32, u64, u64), String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::DownloadFolder);
         transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
 
@@ -1283,13 +1283,9 @@ impl HotlineClient {
                     .get_field(FieldType::ReferenceNumber)
                     .and_then(|f| f.to_u32().ok())
                     .ok_or("No reference number in reply".to_string())?;
-                let transfer_size = reply
-                    .get_field(FieldType::TransferSize)
-                    .and_then(|f| f.to_u32().ok())
+                let transfer_size = read_extended_size(&reply, FieldType::TransferSize64, FieldType::TransferSize)
                     .ok_or("No transfer size in reply".to_string())?;
-                let item_count = reply
-                    .get_field(FieldType::FolderItemCount)
-                    .and_then(|f| f.to_u32().ok())
+                let item_count = read_extended_size(&reply, FieldType::FolderItemCount64, FieldType::FolderItemCount)
                     .unwrap_or(0);
                 Ok((reference_number, transfer_size, item_count))
             }
@@ -1307,10 +1303,15 @@ impl HotlineClient {
     }
 
     /// Upload an entire folder to the server
-    pub async fn upload_folder(&self, path: Vec<String>, file_name: String, item_count: u16) -> Result<u32, String> {
+    pub async fn upload_folder(&self, path: Vec<String>, file_name: String, item_count: u64) -> Result<u32, String> {
         let mut transaction = Transaction::new(self.next_transaction_id(), TransactionType::UploadFolder);
         transaction.add_field(TransactionField::from_string(FieldType::FileName, &file_name));
-        transaction.add_field(TransactionField::from_u16(FieldType::FolderItemCount, item_count));
+        if self.large_file_support.load(Ordering::SeqCst) {
+            transaction.add_field(TransactionField::from_u64(FieldType::FolderItemCount64, item_count));
+        } else if item_count > u16::MAX as u64 {
+            return Err("Folder contains too many items for a legacy server".into());
+        }
+        transaction.add_field(TransactionField::from_u16(FieldType::FolderItemCount, item_count.min(u16::MAX as u64) as u16));
 
         if !path.is_empty() {
             if let Some(path_data) = encode_file_path(&path) {
@@ -1634,6 +1635,39 @@ pub struct FileInfoDetails {
     pub creator: String,
     pub file_size: u64,
     pub comment: String,
-    pub create_date: u32,
-    pub modify_date: u32,
+    pub create_date: Option<String>,
+    pub modify_date: Option<String>,
+}
+
+/// Prefer an explicitly supplied extended value, including zero. A legacy
+/// folder count can be 16 or 32 bits depending on the server.
+fn read_extended_size(reply: &Transaction, extended: FieldType, legacy: FieldType) -> Option<u64> {
+    reply.get_field(extended).and_then(|f| f.to_u64().ok()).or_else(|| {
+        reply.get_field(legacy).and_then(|f| f.to_u32().ok().map(u64::from)
+            .or_else(|| f.to_u16().ok().map(u64::from)))
+    })
+}
+
+#[cfg(test)]
+mod extended_metadata_tests {
+    use super::*;
+    #[test]
+    fn file_and_folder_sizes_prefer_extended_values_without_truncation() {
+        for (wide, old) in [(FieldType::FileSize64, FieldType::FileSize),
+            (FieldType::TransferSize64, FieldType::TransferSize),
+            (FieldType::FolderItemCount64, FieldType::FolderItemCount)] {
+            let mut reply = Transaction::new(1, TransactionType::GetFileInfo);
+            reply.add_field(TransactionField::from_u32(old, u32::MAX));
+            reply.add_field(TransactionField::from_u64(wide, 1u64 << 40));
+            assert_eq!(read_extended_size(&reply, wide, old), Some(1u64 << 40));
+        }
+    }
+    #[test]
+    fn legacy_sizes_and_zero_extended_values_are_preserved() {
+        let mut reply = Transaction::new(1, TransactionType::DownloadFolder);
+        reply.add_field(TransactionField::from_u16(FieldType::FolderItemCount, 42));
+        assert_eq!(read_extended_size(&reply, FieldType::FolderItemCount64, FieldType::FolderItemCount), Some(42));
+        reply.add_field(TransactionField::from_u64(FieldType::FolderItemCount64, 0));
+        assert_eq!(read_extended_size(&reply, FieldType::FolderItemCount64, FieldType::FolderItemCount), Some(0));
+    }
 }

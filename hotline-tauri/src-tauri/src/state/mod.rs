@@ -479,6 +479,7 @@ impl AppState {
                         let payload = crate::commands::InlineMediaStatus {
                             server_supports,
                             can_send: can_send_media,
+                            limits: None,
                         };
                         let _ = app_handle.emit(
                             &format!("inline-media-status-{}", server_id_clone),
@@ -607,10 +608,10 @@ impl AppState {
     pub async fn inline_media_status(
         &self,
         server_id: &str,
-    ) -> Result<(bool, bool), String> {
+    ) -> Result<(bool, bool, crate::protocol::client::media::MediaLimits), String> {
         let clients = self.clients.read().await;
         if let Some(client) = clients.get(server_id) {
-            Ok((client.inline_media_supported(), client.can_send_media()))
+            Ok((client.inline_media_supported(), client.can_send_media(), *client.media_limits.read().await))
         } else {
             Err("Server not connected".to_string())
         }
@@ -1050,10 +1051,10 @@ impl AppState {
         }
     }
 
-    pub async fn send_private_chat_message(&self, server_id: &str, chat_id: u32, message: String) -> Result<(), String> {
+    pub async fn send_private_chat_message(&self, server_id: &str, chat_id: u32, message: String, media: Option<crate::protocol::client::chat::ChatMediaAttachment>) -> Result<(), String> {
         let clients = self.clients.read().await;
         if let Some(client) = clients.get(server_id) {
-            client.send_private_chat_message(chat_id, message).await
+            client.send_private_chat_message_with_media(chat_id, message, media).await
         } else {
             Err("Server not connected".to_string())
         }

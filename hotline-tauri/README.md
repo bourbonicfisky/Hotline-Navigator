@@ -675,3 +675,16 @@ Existing password-vault entries migrate when the vault is first opened. The old
 snapshot is removed only after the protected snapshot is saved; a failed migration
 leaves the original available for retry. Cancelling leaves saved passwords locked.
 Editing a bookmark keeps its saved password unless **Remove saved password** is selected.
+
+### Protocol completion
+
+Private messages and private rooms support the same image attachments as public
+chat. Failed sends retain drafts; reconnects discard old media handles. The client
+honors advertised image byte, dimension, pixel, animation, and chunk limits, with
+conservative defaults when fields are absent and local safety ceilings.
+
+File Info now fetches server details, including 64-bit sizes and creation/modification
+dates. News and file dates accept both Mac-1904 and modern formats; modern-date
+capability is advertised. Folder request metadata uses 64-bit sizes/counts, but
+whole-folder transfer execution and resume remain separate work. History uses
+MacRoman consistently with the current session; UTF-8 negotiation remains separate.

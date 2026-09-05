@@ -1,21 +1,28 @@
+import type { ChatMessageMedia } from '../server/serverTypes';
+import { useChatAttachment, type UploadedMedia } from './useChatAttachment';
+import AttachmentControls from './AttachmentControls';
+import MediaImage from './MediaImage';
 import { useState, useEffect, useRef } from 'react';
 import MarkdownText from '../common/MarkdownText';
 
 interface Message {
+  media?: ChatMessageMedia;
   text: string;
   isOutgoing: boolean;
   timestamp: Date;
 }
 
 interface MessageDialogProps {
+  serverId: string;
   userId: number;
   userName: string;
   messages: Message[];
-  onSendMessage: (userId: number, message: string) => Promise<void>;
+  onSendMessage: (userId: number, message: string, media?: UploadedMedia | null) => Promise<void>;
   onClose: () => void;
 }
 
-export default function MessageDialog({ userId, userName, messages, onSendMessage, onClose }: MessageDialogProps) {
+export default function MessageDialog({ serverId, userId, userName, messages, onSendMessage, onClose }: MessageDialogProps) {
+  const attachment = useChatAttachment(serverId, userName);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [visible, setVisible] = useState(false);
@@ -37,14 +44,13 @@ export default function MessageDialog({ userId, userName, messages, onSendMessag
   }, [messages]);
 
   const sendCurrentMessage = async () => {
-    if (!input.trim() || sending) return;
+    if ((!input.trim() && !attachment.staged) || sending || attachment.uploading) return;
 
     const messageText = input.trim();
     setSending(true);
 
     try {
-      await onSendMessage(userId, messageText);
-      setInput('');
+      if (await attachment.send((media) => onSendMessage(userId, messageText || '[image]', media))) setInput('');
     } catch (error) {
       console.error('Failed to send private message:', error);
       // Error will be handled by useServerHandlers
@@ -130,6 +136,7 @@ export default function MessageDialog({ userId, userName, messages, onSendMessag
                 >
                   <div className="text-sm font-sans whitespace-pre-wrap break-words">
                     <MarkdownText text={msg.text} />
+                    {msg.media && <MediaImage serverId={serverId} media={msg.media} />}
                   </div>
                 </div>
               </div>
@@ -141,6 +148,7 @@ export default function MessageDialog({ userId, userName, messages, onSendMessag
 
         {/* Input */}
         <form onSubmit={handleSend} className="border-t border-gray-200 dark:border-gray-700 p-4">
+          <AttachmentControls attachment={attachment} />
           <div className="flex gap-2">
             <textarea
               ref={inputRef}
@@ -148,13 +156,14 @@ export default function MessageDialog({ userId, userName, messages, onSendMessag
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleInputKeyDown}
+              onPaste={attachment.handlePaste}
               placeholder={`Message ${userName}...`}
               disabled={sending}
               className="flex-1 px-3 py-2 leading-6 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 resize-none"
             />
             <button
               type="submit"
-              disabled={!input.trim() || sending}
+              disabled={(!input.trim() && !attachment.staged) || sending || attachment.uploading}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-md font-medium disabled:cursor-not-allowed"
             >
               {sending ? 'Sending...' : 'Send'}

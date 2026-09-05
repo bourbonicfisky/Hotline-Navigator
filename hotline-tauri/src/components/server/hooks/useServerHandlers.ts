@@ -1,3 +1,4 @@
+import type { UploadedMedia } from '../../chat/useChatAttachment';
 import { invoke } from '@tauri-apps/api/core';
 import { openPath } from '@tauri-apps/plugin-opener';
 import type { ChatMessage, NewsArticle } from '../serverTypes';
@@ -124,16 +125,10 @@ export function useServerHandlers({
       logError('Chat', 'Failed to send message', err);
       if (optimisticKey) {
         const key = optimisticKey;
-        setMessages((prev) =>
-          prev.map((m) => (m.optimisticKey === key ? { ...m, pending: false } : m))
-        );
+        setMessages((prev) => prev.filter((m) => m.optimisticKey !== key));
+        setMessage(messageText);
       }
-      showNotification.error(
-        `Failed to send message: ${err}`,
-        'Message Error',
-        undefined,
-        serverName
-      );
+      throw err;
     } finally {
       setSending(false);
     }
@@ -296,13 +291,14 @@ export function useServerHandlers({
     }
   };
 
-  const handleSendPrivateMessage = async (userId: number, message: string) => {
+  const handleSendPrivateMessage = async (userId: number, message: string, media?: UploadedMedia | null) => {
     log('Chat', 'Sending private message', { userId });
     try {
       await invoke('send_private_message', {
         serverId,
         userId,
         message,
+        media: media ?? null,
       });
       log('Chat', 'Private message sent', { userId });
 
@@ -313,6 +309,7 @@ export function useServerHandlers({
           ...userMessages,
           {
             text: message,
+            media: media ? { ...media, state: 'placeholder' } : undefined,
             isOutgoing: true,
             timestamp: new Date(),
           },

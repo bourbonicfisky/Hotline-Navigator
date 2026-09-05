@@ -40,3 +40,11 @@ This change does the minimum to make Navigator a well-behaved capabilities citiz
 - **Wire compatibility**: Fully backward compatible. Servers that read 2 bytes will see the low 2 bytes (which is where today's bits live). Servers that read 8 bytes get the full value with high bits zero.
 - **Risk**: Low. Pure protocol-layer hygiene. The date fix is a strict improvement (today's behavior is broken on 1904-format input). The widening is invisible against any current server. The helper is a refactor.
 - **Out of scope**: Adding any new capability bits. This change creates the runway; subsequent changes (`macroman-encoding` amendment, `inline-media-protocol`, `voice-protocol`) consume it.
+
+## Scope amendment: finish existing partial features
+
+Complete private-message/private-room inline media and consume advertised media
+limits; correct 64-bit file-info and folder request metadata; share dual-format
+date decoding across news and file info and advertise modern dates; decode history
+using the current MacRoman session encoding. Full UTF-8 negotiation, whole-folder
+transfer execution, resume, voice, discovery and other new features remain separate.

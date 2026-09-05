@@ -181,6 +181,8 @@ pub async fn download_media(
 pub struct InlineMediaStatus {
     pub server_supports: bool,
     pub can_send: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::protocol::client::media::MediaLimits>,
 }
 
 #[tauri::command]
@@ -188,8 +190,8 @@ pub async fn get_inline_media_status(
     server_id: String,
     state: State<'_, AppState>,
 ) -> Result<InlineMediaStatus, String> {
-    let (server_supports, can_send) = state.inline_media_status(&server_id).await?;
-    Ok(InlineMediaStatus { server_supports, can_send })
+    let (server_supports, can_send, limits) = state.inline_media_status(&server_id).await?;
+    Ok(InlineMediaStatus { server_supports, can_send, limits: Some(limits) })
 }
 
 #[tauri::command]
@@ -949,9 +951,10 @@ pub async fn send_private_chat(
     server_id: String,
     chat_id: u32,
     message: String,
+    media: Option<ChatMediaInput>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.send_private_chat_message(&server_id, chat_id, message).await
+    state.send_private_chat_message(&server_id, chat_id, message, media.map(Into::into)).await
 }
 
 #[tauri::command]

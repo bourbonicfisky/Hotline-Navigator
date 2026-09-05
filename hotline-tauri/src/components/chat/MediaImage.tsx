@@ -53,68 +53,51 @@ export default function MediaImage({
   const [state, setState] = useState(media.state);
   const [bytesUrl, setBytesUrl] = useState(media.bytesUrl);
   const [failureReason, setFailureReason] = useState(media.failureReason);
-  const blobUrlRef = useRef<string | null>(null);
-  const inflightRef = useRef(false);
-
+  const [dimensions, setDimensions] = useState({ width: media.width, height: media.height });
+  const callbacks = useRef({ onLoaded, onFailed });
+  callbacks.current = { onLoaded, onFailed };
   useEffect(() => {
-    setState(media.state);
+    let cancelled = false;
+    let ownedUrl: string | undefined;
     setBytesUrl(media.bytesUrl);
+    setState(media.state);
     setFailureReason(media.failureReason);
-  }, [media.state, media.bytesUrl, media.failureReason]);
-
-  useEffect(() => {
-    // If already loaded (own optimistic echo with bytes), don't fetch.
-    if (state === 'loaded' && bytesUrl) return;
-    if (state === 'failed') return;
-    if (inflightRef.current) return;
-
-    inflightRef.current = true;
+    setDimensions({ width: media.width, height: media.height });
+    if (media.state === 'failed' || (media.state === 'loaded' && media.bytesUrl)) return;
     setState('loading');
-
-    invoke<DownloadedMedia>('download_media', {
-      serverId,
-      handle: media.handle,
-    })
+    invoke<DownloadedMedia>('download_media', { serverId, handle: media.handle })
       .then((result) => {
-        const blob = base64ToBlob(result.bytesBase64, result.mime);
-        const url = URL.createObjectURL(blob);
-        blobUrlRef.current = url;
-        setBytesUrl(url);
+        if (cancelled) return;
+        ownedUrl = URL.createObjectURL(base64ToBlob(result.bytesBase64, result.mime));
+        setBytesUrl(ownedUrl);
+        setDimensions({ width: result.width, height: result.height });
         setState('loaded');
-        onLoaded?.(url);
+        callbacks.current.onLoaded?.(ownedUrl);
       })
       .catch((err: unknown) => {
-        const reason = typeof err === 'string' ? err : String(err);
+        if (cancelled) return;
+        const reason = String(err);
         setFailureReason(reason);
         setState('failed');
-        onFailed?.(reason);
-      })
-      .finally(() => {
-        inflightRef.current = false;
+        callbacks.current.onFailed?.(reason);
       });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [media.handle, serverId]);
-
-  // Revoke blob URL on unmount or handle change to free memory.
-  useEffect(() => {
     return () => {
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
-      }
+      cancelled = true;
+      if (ownedUrl) URL.revokeObjectURL(ownedUrl);
     };
-  }, [media.handle]);
+  }, [serverId, media.handle, media.state, media.bytesUrl, media.failureReason, media.width, media.height]);
 
   // Compute display dimensions: cap width, scale height proportionally.
-  const aspect = media.width > 0 && media.height > 0 ? media.height / media.width : 0.5625;
-  const displayWidth = Math.min(media.width || maxDisplayWidth, maxDisplayWidth);
-  const displayHeight = Math.round(displayWidth * aspect);
+  const aspect = dimensions.width > 0 && dimensions.height > 0 ? dimensions.height / dimensions.width : 0.5625;
+  const displayWidth = Math.min(dimensions.width || maxDisplayWidth, maxDisplayWidth);
+  const displayHeight = Math.min(480, Math.round(displayWidth * aspect));
 
   if (state === 'loaded' && bytesUrl) {
     return (
       <div className="mt-1 inline-block max-w-full">
         <img
           src={bytesUrl}
+          onError={() => { setState('failed'); setFailureReason('Image could not be decoded'); }}
           alt={media.filename ?? media.mime}
           className="rounded-md border border-gray-200 dark:border-gray-700 max-w-full h-auto"
           style={{ maxWidth: `${displayWidth}px` }}

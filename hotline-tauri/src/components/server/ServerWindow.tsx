@@ -1,3 +1,4 @@
+import type { UploadedMedia } from '../chat/useChatAttachment';
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -789,13 +790,14 @@ export default function ServerWindow({ serverId, serverName, onClose }: ServerWi
     }
   };
 
-  const handlePrivateChatSend = async (chatId: number, message: string) => {
+  const handlePrivateChatSend = async (chatId: number, message: string, media?: UploadedMedia | null) => {
     log('Chat', 'Sending private chat message', { chatId });
     try {
-      await invoke('send_private_chat', { serverId, chatId, message });
+      await invoke('send_private_chat', { serverId, chatId, message, media: media ?? null });
       log('Chat', 'Private chat message sent', { chatId });
     } catch (error) {
       logError('Chat', 'Failed to send private chat message', error);
+      throw error;
     }
   };
 
@@ -926,7 +928,7 @@ export default function ServerWindow({ serverId, serverName, onClose }: ServerWi
   ) => {
     e.preventDefault();
     if ((!message.trim() && !media) || sending) return;
-    handleSendMessage(e, message, sending, media ?? null);
+    return handleSendMessage(e, message, sending, media ?? null);
   };
 
   const handlePostBoardWrapper = (e: React.FormEvent) => {
@@ -1306,6 +1308,7 @@ export default function ServerWindow({ serverId, serverName, onClose }: ServerWi
             if (!room) return null;
             return (
               <PrivateChatTab
+                serverId={serverId}
                 room={room}
                 onSendMessage={handlePrivateChatSend}
                 onLeave={handleLeaveChat}
@@ -1434,6 +1437,7 @@ export default function ServerWindow({ serverId, serverName, onClose }: ServerWi
       {/* Message Dialog */}
       {messageDialogUser && (
         <MessageDialog
+          serverId={serverId}
           userId={messageDialogUser.userId}
           userName={messageDialogUser.userName}
           messages={privateMessageHistory.get(messageDialogUser.userId) || []}

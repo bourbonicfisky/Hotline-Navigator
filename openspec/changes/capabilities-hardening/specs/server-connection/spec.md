@@ -52,3 +52,30 @@ The system SHALL provide `TransactionField::from_u64(field_type, value)` that en
 
 - **WHEN** `to_u64()` is called on a field with width other than 2, 4, or 8 bytes
 - **THEN** the function SHALL return an error and the caller SHALL treat the capabilities as zero
+
+### Requirement: Complete existing capability consumers
+
+The client SHALL advertise modern dates (bit 9) with a shared dual-format decoder
+for news and Get File Info date fields. It SHALL prefer 64-bit file and folder
+metadata with legacy fallback. Capability serialization retains the existing
+smallest supported width (2, 4, or 8 bytes) for legacy compatibility, superseding
+the original fixed-width wording above.
+
+History text SHALL decode as MacRoman while UTF-8 capability remains unadvertised.
+Media limits from a negotiated login reply SHALL govern attachment preflight,
+chunk slicing, image dimensions, decoded pixels and animation frames/duration,
+with documented defaults and stricter local ceilings. Private message and room
+views SHALL preserve, send and render the same media metadata as public chat.
+
+#### Scenario: Interrupted attachment send
+- **WHEN** upload succeeds but sending the message fails
+- **THEN** the draft and handle SHALL remain available for retry in that session
+- **AND** a disconnect SHALL invalidate that handle before it can be reused
+
+#### Scenario: Non-ASCII legacy history
+- **WHEN** history includes MacRoman accented text in a session without bit 1
+- **THEN** the displayed nickname and message SHALL preserve those characters
+
+#### Scenario: Large file details
+- **WHEN** file info includes both a legacy size and a 64-bit size above 4 GiB
+- **THEN** the client SHALL use the 64-bit value and display the decoded dates

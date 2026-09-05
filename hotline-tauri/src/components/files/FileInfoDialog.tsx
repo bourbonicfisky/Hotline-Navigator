@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/appStore';
 
@@ -22,6 +23,18 @@ function formatBytes(bytes: number): string {
 }
 
 export default function FileInfoDialog({ serverId, fileName, fileSize, fileType, creator, isFolder, path, onClose }: FileInfoDialogProps) {
+  const [details, setDetails] = useState<{ file_size: number; create_date: string | null; modify_date: string | null; comment: string } | null>(null);
+  const [infoError, setInfoError] = useState(false);
+  const pathKey = JSON.stringify(path);
+  useEffect(() => {
+    let active = true;
+    setDetails(null);
+    setInfoError(false);
+    invoke<typeof details>('get_file_info', { serverId, path: JSON.parse(pathKey), fileName })
+      .then((value) => { if (active) setDetails(value); })
+      .catch(() => { if (active) setInfoError(true); });
+    return () => { active = false; };
+  }, [serverId, pathKey, fileName]);
   const [visible, setVisible] = useState(false);
   const serverInfo = useAppStore((s) => s.serverInfo.get(serverId));
 
@@ -56,9 +69,13 @@ export default function FileInfoDialog({ serverId, fileName, fileSize, fileType,
   ];
 
   if (!isFolder) {
-    rows.push({ label: 'Size', value: `${formatBytes(fileSize)} (${fileSize.toLocaleString()} bytes)` });
+    rows.push({ label: 'Size', value: `${formatBytes(details?.file_size ?? fileSize)} (${(details?.file_size ?? fileSize).toLocaleString()} bytes)` });
   }
 
+  if (details?.create_date) rows.push({ label: 'Created', value: details.create_date });
+  if (details?.modify_date) rows.push({ label: 'Modified', value: details.modify_date });
+  if (details?.comment) rows.push({ label: 'Comment', value: details.comment });
+  if (infoError) rows.push({ label: 'Details', value: 'Server details unavailable' });
   if (creator) {
     rows.push({ label: 'Creator', value: creator });
   }

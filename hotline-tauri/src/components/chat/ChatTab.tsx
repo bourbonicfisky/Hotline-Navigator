@@ -1,15 +1,12 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import MarkdownText from '../common/MarkdownText';
 import DiscordChatRenderer from './DiscordChatRenderer';
 import MediaImage from './MediaImage';
 import AttachChip from './AttachChip';
+import { useChatAttachment } from './useChatAttachment';
 import { usePreferencesStore } from '../../stores/preferencesStore';
 import { resolveNameColor } from '../../utils/displayColor';
 import { useThemeBackground } from '../../hooks/useThemeBackground';
-import { showNotification } from '../../stores/notificationStore';
-import { log, error as logError } from '../../utils/logger';
 import type { ChatMessageMedia } from '../server/serverTypes';
 
 interface ChatMessage {
@@ -32,18 +29,6 @@ interface ChatMessage {
   media?: ChatMessageMedia;
 }
 
-interface StagedImage {
-  bytesBase64: string;
-  mime: string;
-  filename: string;
-  byteSize: number;
-}
-
-interface InlineMediaStatus {
-  serverSupports: boolean;
-  canSend: boolean;
-}
-
 interface ChatUser {
   userId: number;
   userName: string;
@@ -63,7 +48,7 @@ interface ChatTabProps {
   agreementText?: string | null;
   canBroadcast?: boolean;
   onMessageChange: (value: string) => void;
-  onSendMessage: (e: React.FormEvent, media?: { handle: string; mime: string } | null) => void;
+  onSendMessage: (e: React.FormEvent, media?: { handle: string; mime: string } | null) => void | Promise<void>;
   onSendBroadcast?: (message: string) => void;
   onAcceptAgreement?: () => void;
   onDeclineAgreement?: () => void;
@@ -109,141 +94,14 @@ export default function ChatTab({
     displayUserColors,
     enforceColorLegibility,
     inlineMediaEnabled,
-    imageUploadSizeKb,
   } = usePreferencesStore();
 
-  // ─── Inline-media state ──────────────────────────────────────────
-  const [staged, setStaged] = useState<StagedImage | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [mediaStatus, setMediaStatus] = useState<InlineMediaStatus>({
-    serverSupports: false,
-    canSend: false,
-  });
-
-  // Probe inline-media status when server / pref changes, and listen for
-  // mid-session access updates (e.g. a freestanding UserAccess transaction
-  // arriving after the login reply).
-  useEffect(() => {
-    let cancelled = false;
-    let gotEvent = false;
-
-    const unlistenPromise = listen<InlineMediaStatus>(
-      `inline-media-status-${serverId}`,
-      (event) => {
-        if (cancelled) return;
-        gotEvent = true;
-        setMediaStatus(event.payload);
-      },
-    );
-
-    // Probe only after the listener is registered so an update can't slip
-    // between the snapshot and the subscription; if an event already arrived,
-    // it is fresher than the snapshot and wins.
-    unlistenPromise
-      .catch(() => {})
-      .then(() => invoke<InlineMediaStatus>('get_inline_media_status', { serverId }))
-      .then((status) => {
-        if (!cancelled && !gotEvent) setMediaStatus(status);
-      })
-      .catch(() => {
-        if (!cancelled && !gotEvent) setMediaStatus({ serverSupports: false, canSend: false });
-      });
-
-    return () => {
-      cancelled = true;
-      unlistenPromise.then((fn) => fn()).catch(() => {});
-    };
-  }, [serverId]);
-
-  const attachEnabled = inlineMediaEnabled && mediaStatus.serverSupports && mediaStatus.canSend;
-  const limitBytes = imageUploadSizeKb * 1024;
-
-  const stageImage = (image: StagedImage) => {
-    if (image.byteSize > limitBytes) {
-      const sizeStr = image.byteSize > 1024 * 1024
-        ? `${(image.byteSize / (1024 * 1024)).toFixed(1)} MB`
-        : `${(image.byteSize / 1024).toFixed(0)} KB`;
-      showNotification.warning(
-        `Image is ${sizeStr}, exceeds your ${imageUploadSizeKb} KB limit. Pick a smaller image or raise the limit in Preferences.`,
-        'Image too large',
-        undefined,
-        serverName,
-      );
-      return;
-    }
-    setStaged(image);
-  };
-
-  const handleAttachClick = async () => {
-    try {
-      const picked = await invoke<StagedImage | null>('pick_image_for_chat');
-      if (picked) stageImage(picked);
-    } catch (err) {
-      logError('Chat', 'pick_image_for_chat failed', err);
-    }
-  };
-
-  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!attachEnabled) return;
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        const blob = item.getAsFile();
-        if (!blob) continue;
-        e.preventDefault();
-        const buf = await blob.arrayBuffer();
-        const bytes = new Uint8Array(buf);
-        let binary = '';
-        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-        stageImage({
-          bytesBase64: btoa(binary),
-          mime: blob.type || 'image/png',
-          filename: '', // pasted images carry no filename
-          byteSize: bytes.length,
-        });
-        return;
-      }
-    }
-  };
-
-  const removeStaged = () => setStaged(null);
-
-  // Wrapped submit: upload first if there's a staged image, then call onSendMessage.
+  const attachment = useChatAttachment(serverId, serverName);
+  const { staged, uploading, mediaStatus, attachEnabled, handleAttachClick, handlePaste, removeStaged } = attachment;
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (sending || uploading) return;
-
-    if (!staged) {
-      onSendMessage(e);
-      return;
-    }
-
-    setUploading(true);
-    try {
-      log('Chat', 'Uploading attached image', { mime: staged.mime, bytes: staged.byteSize });
-      const result = await invoke<{ handle: string; mime: string; width: number; height: number; byteSize: number }>(
-        'upload_media',
-        {
-          serverId,
-          bytesBase64: staged.bytesBase64,
-          declaredMime: staged.mime,
-        },
-      );
-      log('Chat', 'Upload complete', { handle: result.handle.slice(0, 16), mime: result.mime });
-      onSendMessage(e, { handle: result.handle, mime: result.mime });
-      setStaged(null);
-    } catch (err) {
-      logError('Chat', 'upload_media failed', err);
-      showNotification.error(
-        `Failed to upload image: ${err}`,
-        'Image Upload Error',
-        undefined,
-        serverName,
-      );
-    } finally {
-      setUploading(false);
-    }
+    await attachment.send((media) => onSendMessage(e, media));
   };
   const themeBg = useThemeBackground();
   const colorPrefs = { displayUserColors, enforceColorLegibility };

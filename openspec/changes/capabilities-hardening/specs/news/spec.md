@@ -10,7 +10,7 @@ When `year != 1904` and `year > 0`, the `secs` field SHALL be interpreted as sec
 
 When `year == 0` or the field is absent, the client SHALL render the article without a date.
 
-This dual-format support is required because servers select date encoding based on whether the client sent `DATA_CAPABILITIES` during login (per the fogWraith Capabilities spec). Vintage servers and any server not implementing the heuristic send Mac-1904 unconditionally.
+Servers select modern dates using capability bit 9 alone. The client SHALL advertise this bit and continue accepting Mac-1904 dates from legacy servers. Year zero is unknown; zero seconds with a nonzero year is a valid date.
 
 #### Scenario: Modern format date
 

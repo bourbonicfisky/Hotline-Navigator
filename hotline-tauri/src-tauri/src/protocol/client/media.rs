@@ -37,6 +37,119 @@ pub const CHUNK_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// we accept up to this defensive cap to bound memory if a server misbehaves.
 pub const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Server-advertised limits are bounded by local defensive ceilings. Missing
+/// fields use protocol defaults; zero limits are honored (uploads disabled).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaLimits {
+    pub max_bytes: u32,
+    pub max_dimension: u32,
+    pub max_pixels: u32,
+    pub chunk_size: u32,
+    pub max_frames: u32,
+    pub max_duration_ms: u32,
+}
+impl Default for MediaLimits {
+    fn default() -> Self {
+        Self { max_bytes: 256 * 1024, max_dimension: 2048,
+            max_pixels: 2048 * 2048, chunk_size: SINGLE_SHOT_THRESHOLD as u32,
+            max_frames: 150, max_duration_ms: 15_000 }
+    }
+}
+impl MediaLimits {
+    pub fn from_reply(reply: &Transaction) -> Self {
+        let d = Self::default();
+        let value = |field, fallback, cap| reply.get_field(field)
+            .and_then(|f| f.to_u32().ok()).unwrap_or(fallback).min(cap);
+        Self {
+            max_bytes: value(FieldType::ChatMediaMaxBytes, d.max_bytes, MAX_DOWNLOAD_BYTES as u32),
+            max_dimension: value(FieldType::ChatMediaMaxDimension, d.max_dimension, 4096),
+            max_pixels: value(FieldType::ChatMediaMaxPixels, d.max_pixels, 4096 * 4096),
+            chunk_size: value(FieldType::ChatMediaChunkSize, d.chunk_size, SINGLE_SHOT_THRESHOLD as u32).max(1),
+            max_frames: value(FieldType::ChatMediaMaxFrames, d.max_frames, 150),
+            max_duration_ms: value(FieldType::ChatMediaMaxDurationMs, d.max_duration_ms, 15_000),
+        }
+    }
+}
+
+/// Inspect and decode with local memory/dimension bounds. Count animation frames
+/// incrementally instead of collecting them in memory. Do not trust wire dimensions.
+pub fn validate_image(bytes: &[u8], mime: &str, limits: MediaLimits) -> Result<(u32, u32), String> {
+    use image::{AnimationDecoder, ImageDecoder, ImageFormat, ImageReader};
+    use std::io::Cursor;
+    if bytes.len() > limits.max_bytes as usize {
+        return Err(format!("Image exceeds the server's {} KB limit", limits.max_bytes / 1024));
+    }
+    let format = match mime {
+        "image/png" => ImageFormat::Png,
+        "image/jpeg" | "image/jpg" => ImageFormat::Jpeg,
+        "image/gif" => ImageFormat::Gif,
+        _ => return Err("Choose a PNG, JPEG, or GIF image".into()),
+    };
+    if let Some((width, height)) = probe_dimensions(bytes, mime) {
+        if width > limits.max_dimension || height > limits.max_dimension
+            || u64::from(width) * u64::from(height) > u64::from(limits.max_pixels) {
+            return Err("Image exceeds dimension or pixel limits; resize it before attaching".into());
+        }
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    let mut decode_limits = image::Limits::default();
+    decode_limits.max_image_width = Some(limits.max_dimension);
+    decode_limits.max_image_height = Some(limits.max_dimension);
+    decode_limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(decode_limits.clone());
+    let decoder = reader.into_decoder().map_err(|e| format!("Invalid image: {e}"))?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > u64::from(limits.max_pixels) {
+        return Err("Image exceeds the server's pixel limit; resize it before attaching".into());
+    }
+    drop(decoder);
+    if format == ImageFormat::Gif {
+        let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
+            .map_err(|e| format!("Invalid GIF: {e}"))?;
+        decoder.set_limits(decode_limits).map_err(|e| e.to_string())?;
+        validate_animation(decoder.into_frames(), limits)?;
+    } else if format == ImageFormat::Png {
+        let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes))
+            .map_err(|e| format!("Invalid PNG: {e}"))?;
+        decoder.set_limits(decode_limits.clone()).map_err(|e| e.to_string())?;
+        if decoder.is_apng().map_err(|e| e.to_string())? {
+            validate_animation(decoder.apng().map_err(|e| e.to_string())?.into_frames(), limits)?;
+        } else {
+            image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+        }
+    } else {
+        let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+        reader.limits(decode_limits);
+        reader.decode().map_err(|e| format!("Invalid image: {e}"))?;
+    }
+    Ok((width, height))
+}
+
+fn validate_animation(frames: image::Frames<'_>, limits: MediaLimits) -> Result<(), String> {
+    let started = Instant::now();
+    let mut duration = 0.0;
+    for (index, frame) in frames.enumerate() {
+        if index >= limits.max_frames as usize || started.elapsed() > Duration::from_secs(2) {
+            return Err("Animation exceeds frame or decode-time limits".into());
+        }
+        let frame = frame.map_err(|e| format!("Invalid animation: {e}"))?;
+        let (num, den) = frame.delay().numer_denom_ms();
+        duration += f64::from(num) / f64::from(den.max(1));
+        if duration > f64::from(limits.max_duration_ms) {
+            return Err("Animation exceeds the server's duration limit".into());
+        }
+    }
+    Ok(())
+}
+
+async fn validate_image_async(bytes: Vec<u8>, mime: String, limits: MediaLimits) -> Result<(Vec<u8>, (u32, u32)), String> {
+    tokio::task::spawn_blocking(move || {
+        let dimensions = validate_image(&bytes, &mime, limits)?;
+        Ok((bytes, dimensions))
+    }).await.map_err(|e| format!("Image validation failed: {e}"))?
+}
+
 pub type MediaHandle = Vec<u8>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,10 +325,12 @@ pub async fn upload_media(
         return Err("Empty payload".to_string());
     }
 
-    if bytes.len() <= SINGLE_SHOT_THRESHOLD {
+    let limits = *client.media_limits.read().await;
+    let (bytes, _) = validate_image_async(bytes, declared_mime.clone(), limits).await?;
+    if bytes.len() <= limits.chunk_size as usize {
         single_shot_upload(client, bytes, declared_mime).await
     } else {
-        chunked_upload(client, bytes, declared_mime).await
+        chunked_upload(client, bytes, declared_mime, limits.chunk_size as usize).await
     }
 }
 
@@ -240,8 +355,9 @@ async fn chunked_upload(
     client: &HotlineClient,
     bytes: Vec<u8>,
     declared_mime: String,
+    chunk_size: usize,
 ) -> Result<MediaMetadata, String> {
-    let chunks: Vec<&[u8]> = bytes.chunks(SINGLE_SHOT_THRESHOLD).collect();
+    let chunks: Vec<&[u8]> = bytes.chunks(chunk_size).collect();
     let total = chunks.len();
     if total > u16::MAX as usize {
         return Err(format!("Image too large: {} chunks exceeds u16", total));
@@ -418,8 +534,8 @@ pub async fn download_media(
     // Magic-byte sanity check
     validate_magic_bytes(&bytes, &mime)?;
 
-    // Probe dimensions from the bytes if server didn't supply them
-    let (width, height) = probe_dimensions(&bytes, &mime).unwrap_or((0, 0));
+    let limits = *client.media_limits.read().await;
+    let (bytes, (width, height)) = validate_image_async(bytes, mime.clone(), limits).await?;
     let byte_size = bytes.len() as u32;
 
     let entry = MediaEntry {
@@ -450,7 +566,7 @@ pub async fn download_media(
 
 /// Best-effort probe of intrinsic image dimensions from the magic-byte header.
 /// Returns None if the format is unrecognized or the header is too short.
-/// Used as a fallback when the server didn't supply WIDTH/HEIGHT fields.
+/// Used for an early bounds check; the full decoder still validates the image.
 fn probe_dimensions(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
     match mime.to_ascii_lowercase().as_str() {
         "image/png" => {
@@ -759,3 +875,54 @@ mod tests {
 type _UnusedMutex = Mutex<()>;
 #[allow(dead_code)]
 type _UnusedArc<T> = Arc<T>;
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+    #[test]
+    fn missing_limits_default_and_advertised_limits_are_bounded() {
+        let mut reply = Transaction::new(1, TransactionType::Login);
+        assert_eq!(MediaLimits::from_reply(&reply).max_bytes, 256 * 1024);
+        reply.add_field(TransactionField::from_u32(FieldType::ChatMediaMaxBytes, 1024));
+        reply.add_field(TransactionField::from_u32(FieldType::ChatMediaChunkSize, 100));
+        reply.add_field(TransactionField::from_u32(FieldType::ChatMediaMaxDimension, u32::MAX));
+        let limits = MediaLimits::from_reply(&reply);
+        assert_eq!(limits.max_bytes, 1024);
+        assert_eq!(limits.chunk_size, 100);
+        assert_eq!(limits.max_dimension, 4096);
+    }
+    #[test]
+    fn validates_real_image_dimensions_not_server_hints() {
+        let mut data = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(4, 3).write_to(&mut data, image::ImageFormat::Png).unwrap();
+        let data = data.into_inner();
+        assert_eq!(validate_image(&data, "image/png", MediaLimits::default()).unwrap(), (4, 3));
+        let mut limits = MediaLimits::default();
+        limits.max_pixels = 11;
+        assert!(validate_image(&data, "image/png", limits).is_err());
+        limits.max_pixels = 12;
+        limits.max_dimension = 3;
+        assert!(validate_image(&data, "image/png", limits).is_err());
+        limits = MediaLimits::default();
+        limits.max_bytes = 1;
+        assert!(validate_image(&data, "image/png", limits).is_err());
+    }
+    #[test]
+    fn animation_frame_and_duration_limits_are_enforced() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            for _ in 0..2 {
+                encoder.encode_frame(image::Frame::from_parts(image::RgbaImage::new(2, 2), 0, 0,
+                    image::Delay::from_numer_denom_ms(100, 1))).unwrap();
+            }
+        }
+        assert!(validate_image(&bytes, "image/gif", MediaLimits::default()).is_ok());
+        let mut limits = MediaLimits::default();
+        limits.max_frames = 1;
+        assert!(validate_image(&bytes, "image/gif", limits).is_err());
+        limits.max_frames = 2;
+        limits.max_duration_ms = 150;
+        assert!(validate_image(&bytes, "image/gif", limits).is_err());
+    }
+}

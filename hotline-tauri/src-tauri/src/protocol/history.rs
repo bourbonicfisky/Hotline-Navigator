@@ -72,10 +72,10 @@ fn read_i64(data: &[u8], offset: usize) -> i64 {
     i64::from_be_bytes(buf)
 }
 
-/// Decode bytes to a string, using lossy UTF-8 conversion
-/// (handles both UTF-8 and Mac Roman gracefully).
+/// History uses the same MacRoman encoding as this client's current sessions.
+/// UTF-8 capability is deliberately not advertised until all text paths support it.
 fn decode_text(data: &[u8]) -> String {
-    String::from_utf8_lossy(data).into_owned()
+    encoding_rs::MACINTOSH.decode(data).0.into_owned()
 }
 
 /// Parse a single `DATA_HISTORY_ENTRY` field's raw bytes into a `HistoryEntry`.
@@ -145,6 +145,14 @@ pub fn parse_history_entry(data: &[u8]) -> Result<HistoryEntry, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macroman_history_matches_the_unnegotiated_session() {
+        let data = build_entry(1, 100, 0, 1, b"Ren\x8ee", b"Caf\x8e");
+        let entry = parse_history_entry(&data).unwrap();
+        assert_eq!(entry.nick, "Renée");
+        assert_eq!(entry.message, "Café");
+    }
 
     /// Build a minimal history entry for testing.
     fn build_entry(msg_id: u64, ts: i64, flags: u16, icon: u16, nick: &[u8], msg: &[u8]) -> Vec<u8> {

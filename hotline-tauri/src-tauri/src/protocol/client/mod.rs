@@ -251,6 +251,7 @@ pub struct HotlineClient {
     pub(crate) can_send_media: Arc<AtomicBool>,
     /// User preference: send/receive inline media. Default true; UI can flip off.
     pub(crate) inline_media_enabled: Arc<AtomicBool>,
+    pub(crate) media_limits: Arc<RwLock<media::MediaLimits>>,
     pub(crate) media_cache: Arc<Mutex<media::MediaCache>>,
 
     // HOPE AEAD file transfer base key (set when AEAD transport is activated)
@@ -316,6 +317,7 @@ impl HotlineClient {
             inline_media_supported: Arc::new(AtomicBool::new(false)),
             can_send_media: Arc::new(AtomicBool::new(false)),
             inline_media_enabled: Arc::new(AtomicBool::new(true)),
+            media_limits: Arc::new(RwLock::new(media::MediaLimits::default())),
             media_cache: Arc::new(Mutex::new(media::MediaCache::new(
                 media::DEFAULT_CACHE_CAP_BYTES,
                 media::DEFAULT_CACHE_CAP_ENTRIES,
@@ -343,7 +345,7 @@ impl HotlineClient {
     /// Single source of truth — both the HOPE auth path and the legacy login path
     /// route through here. Provisional bits (currently bit 5) are never advertised.
     fn client_capability_bits(&self) -> u64 {
-        let mut bits = CAPABILITY_LARGE_FILES | CAPABILITY_CHAT_HISTORY;
+        let mut bits = CAPABILITY_LARGE_FILES | CAPABILITY_CHAT_HISTORY | crate::protocol::constants::CAPABILITY_MODERN_DATES;
         if self.inline_media_enabled.load(Ordering::SeqCst) {
             bits |= CAPABILITY_INLINE_MEDIA;
         }
@@ -1151,6 +1153,7 @@ impl HotlineClient {
 
         let inline_media = (server_capabilities & CAPABILITY_INLINE_MEDIA) != 0;
         self.inline_media_supported.store(inline_media, Ordering::SeqCst);
+        *self.media_limits.write().await = if inline_media { media::MediaLimits::from_reply(&login_reply) } else { media::MediaLimits::default() };
 
         // Spec: bit 5 (CAPABILITY_EXTENDED_PRIV) is provisional. We never advertise it.
         // If a server echoes it back anyway, log a warning and continue parsing
@@ -2064,6 +2067,17 @@ mod tests {
         });
 
         Ok((port, handle))
+    }
+
+    #[test]
+    fn advertised_capabilities_match_implemented_features_and_preferences() {
+        use crate::protocol::constants::*;
+        let client = HotlineClient::new(test_tls_bookmark(5500), false);
+        let expected = CAPABILITY_LARGE_FILES | CAPABILITY_CHAT_HISTORY | CAPABILITY_MODERN_DATES;
+        assert_eq!(client.client_capability_bits(), expected | CAPABILITY_INLINE_MEDIA);
+        client.set_inline_media_enabled(false);
+        assert_eq!(client.client_capability_bits(), expected);
+        assert_eq!(client.client_capability_bits() & (CAPABILITY_EXTENDED_PRIV | CAPABILITY_TEXT_ENCODING | CAPABILITY_VOICE), 0);
     }
 
     fn test_tls_bookmark(port: u16) -> crate::protocol::types::Bookmark {

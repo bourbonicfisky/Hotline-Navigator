@@ -51,6 +51,7 @@ export interface User {
 }
 
 export interface PrivateMessage {
+  media?: ChatMessageMedia;
   text: string;
   isOutgoing: boolean;
   timestamp: Date;

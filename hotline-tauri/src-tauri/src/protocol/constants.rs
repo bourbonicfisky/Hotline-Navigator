@@ -178,6 +178,7 @@ pub const DEFAULT_TRACKER_PORT: u16 = 5498;
 // Capability flags (DATA_CAPABILITIES bitmask, per fogWraith Capabilities spec).
 // Per spec: "implementations should use a width that accommodates future growth.
 // An 8-byte (64-bit) field provides 64 capability slots."
+pub const CAPABILITY_MODERN_DATES: u64 = 0x0200; // bit 9
 pub const CAPABILITY_LARGE_FILES: u64 = 0x0001; // bit 0
 pub const CAPABILITY_TEXT_ENCODING: u64 = 0x0002; // bit 1 (UTF-8)
 pub const CAPABILITY_VOICE: u64 = 0x0004; // bit 2 (WebRTC)
@@ -419,6 +420,12 @@ pub enum FieldType {
     ChatMediaPartIndex = 521,      // 0x0209 — u16 chunk index
     ChatMediaPartCount = 522,      // 0x020A — u16 total chunks
     ChatMediaPartFinal = 523,      // 0x020B — u8 non-zero on final chunk
+    ChatMediaMaxBytes = 524,
+    ChatMediaMaxDimension = 525,
+    ChatMediaMaxPixels = 526,
+    ChatMediaChunkSize = 527,
+    ChatMediaMaxFrames = 528,
+    ChatMediaMaxDurationMs = 529,
     // Colored nicknames extension
     NickColor = 1280,              // 0x0500 - DATA_COLOR (32-bit 0x00RRGGBB)
     // HOPE (Hotline One-time Password Extension) fields
@@ -526,6 +533,13 @@ impl From<u16> for FieldType {
             521 => Self::ChatMediaPartIndex,
             522 => Self::ChatMediaPartCount,
             523 => Self::ChatMediaPartFinal,
+            524 => Self::ChatMediaMaxBytes,
+            525 => Self::ChatMediaMaxDimension,
+            526 => Self::ChatMediaMaxPixels,
+            527 => Self::ChatMediaChunkSize,
+            528 => Self::ChatMediaMaxFrames,
+            529 => Self::ChatMediaMaxDurationMs,
+
             1280 => Self::NickColor,
             3585 => Self::HopeAppId,
             3586 => Self::HopeAppString,

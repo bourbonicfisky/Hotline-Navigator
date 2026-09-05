@@ -4,7 +4,7 @@
 - [x] Add `year == 1904` branch to news date decoder: when `year == 1904`, treat `secs` as total seconds since 1904-01-01 UTC; compute calendar date by walking forward year-by-year from 1904
 - [x] Keep existing "secs since Jan 1 of `year`" path for `year != 1904`
 - [x] Extract logic into `decode_hotline_date(year: u16, secs: u32) -> Option<String>` helper in [client/news.rs](hotline-tauri/src-tauri/src/protocol/client/news.rs)
-- [ ] Audit `Get File Info (200)` reply parser and `FlatFileInformationFork` decoders; if either currently decodes `FieldFileCreateDate` / `FieldFileModifyDate`, apply the same dual-format logic. *(Deferred — no current decode paths for these dates in Navigator. Will revisit if/when `Get File Info` UI lands.)*
+- [x] Decode Get File Info (206) dates with the shared dual-format parser and display them in File Info. Transfer INFO forks are skipped rather than decoded; restoring filesystem metadata remains separate.
 - [x] Unit tests:
   - 1904-epoch decode: `(1904, 3_850_070_400)` → `1/1/2026 12:00 AM`
   - Modern decode: `(2026, 1)` → `1/1/2026 12:00 AM`
@@ -24,7 +24,7 @@
 - [x] Defined `fn client_capability_bits(&self) -> u64` on `HotlineClient`
 - [x] Initial implementation returns `CAPABILITY_LARGE_FILES | CAPABILITY_CHAT_HISTORY` (matches prior behavior)
 - [x] Replace both hardcoded ORs with `self.client_capability_bits()` at both send sites
-- [ ] Unit test: helper returns expected bitmask under each connection state. *(Deferred — current implementation is constant-valued; tests become meaningful once `macroman-encoding` makes it conditional on bookmark/HOPE state.)*
+- [x] Unit test: advertised bits include modern dates, follow the media preference, and exclude UTF-8, voice, and provisional privileges.
 
 ### 4. Defensive bit-5 handling
 - [x] Added `CAPABILITY_EXTENDED_PRIV: u64 = 0x0020` constant; NOT included in `client_capability_bits()`
@@ -45,3 +45,11 @@
 - [x] `cargo check` passes with no new warnings
 - [ ] Connect to System7 Today and Apple Media Archive — verify login still succeeds with the wider capability field. *(Manual smoke test, defer until pre-merge.)*
 - [ ] Connect to a vintage server (or simulate) sending year=1904 dates — verify correct rendering. *(No vintage server in default bookmarks; deferred until we find one or build a test fixture.)*
+
+### 7. Complete existing partial features
+- [x] Preserve and render media in private messages and rooms; share attachment composer behavior, retain drafts on failures.
+- [x] Parse advertised media byte/dimension/pixel/frame/duration/chunk limits; enforce upload and decode limits and use recommended chunks.
+- [x] Prefer 64-bit file-info sizes and folder transfer sizes/counts with legacy fallback.
+- [x] Share 8-byte date decoding across news/file info; display file dates and advertise modern dates only with dual-format decoding.
+- [x] Decode history text as MacRoman for current sessions without enabling new UTF-8 negotiation.
+- [x] Add regression coverage and run frontend/Rust suites and production build; document live-server/mobile verification limits.

@@ -40,6 +40,7 @@ hkdf = "0.12"
 tauri-plugin-stronghold = "2"
 rust-argon2 = "2"
 hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 rfd = "0.14"
