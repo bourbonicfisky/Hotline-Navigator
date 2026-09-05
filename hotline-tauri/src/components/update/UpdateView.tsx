@@ -1,3 +1,4 @@
+import { version as buildVersion } from '../../../src-tauri/tauri.conf.json';
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
@@ -20,7 +21,7 @@ interface UpdateViewProps {
 }
 
 export default function UpdateView({ onClose }: UpdateViewProps) {
-  const [currentVersion, setCurrentVersion] = useState<string>('0.2.3');
+  const [currentVersion, setCurrentVersion] = useState<string>(buildVersion);
   const [isChecking, setIsChecking] = useState(false);
   const [update, setUpdate] = useState<UpdateRelease | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +29,7 @@ export default function UpdateView({ onClose }: UpdateViewProps) {
 
   useEffect(() => {
     getVersion().then(setCurrentVersion).catch(() => {
-      setCurrentVersion('0.2.3');
+      setCurrentVersion(buildVersion);
     });
   }, []);
 

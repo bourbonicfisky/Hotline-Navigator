@@ -1,14 +1,15 @@
+import { version as buildVersion } from '../../../src-tauri/tauri.conf.json';
 import { useState, useEffect } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import AboutStarfield from './AboutStarfield';
 
 export default function AboutSettingsTab() {
-  const [version, setVersion] = useState<string>('0.2.3');
+  const [version, setVersion] = useState<string>(buildVersion);
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {
-      setVersion('0.2.3');
+      setVersion(buildVersion);
     });
   }, []);
 
