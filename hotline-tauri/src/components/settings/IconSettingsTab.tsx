@@ -117,55 +117,120 @@ const CLASSIC_ICON_SET = [
 export default function IconSettingsTab() {
   const { userIconId, setUserIconId } = usePreferencesStore();
   const [hoveredIconId, setHoveredIconId] = useState<number | null>(null);
+  
+  // Local state for the input field to avoid live-updating the store
+  const [pendingId, setPendingId] = useState(userIconId.toString());
   const selectedIconRef = useRef<HTMLDivElement>(null);
 
+  // Sync local input if the user selects an icon from the grid
   useEffect(() => {
-    // Scroll to selected icon when component mounts
+    setPendingId(userIconId.toString());
+  }, [userIconId]);
+
+  useEffect(() => {
     if (selectedIconRef.current) {
       selectedIconRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, []);
 
+  const handleApplyCustomId = () => {
+    const numericId = parseInt(pendingId, 10);
+    if (!isNaN(numericId)) {
+      setUserIconId(numericId);
+    }
+  };
+
+  // Allow pressing "Enter" to save
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleApplyCustomId();
+    }
+  };
+
+  const isChanged = pendingId !== userIconId.toString();
+
   return (
-    <div className="p-6 flex flex-col overflow-hidden h-full">
-      <div className="mb-4 flex-shrink-0">
-        <p className="text-sm text-gray-600 dark:text-gray-400">
-          Select an icon to represent you on servers. Click an icon to select it.
-        </p>
+    <div className="p-6 space-y-6">
+      {/* Custom Icon ID Section */}
+      <div className="bg-white dark:bg-gray-800 p-4 rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm">
+        <h3 className="text-sm font-medium mb-3 text-gray-700 dark:text-gray-300">Manual Icon Entry</h3>
+        <div className="flex items-end gap-3">
+          <div className="flex-1">
+            <label className="text-xs text-gray-500 mb-1 block">Icon ID</label>
+            <input
+              type="number"
+              value={pendingId}
+              onChange={(e) => setPendingId(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="e.g. 2055"
+              className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+            />
+          </div>
+          
+          <button
+            onClick={handleApplyCustomId}
+            disabled={!isChanged || pendingId === ''}
+            className={`px-4 py-2 rounded-md font-medium transition-all ${
+              isChanged 
+                ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-md' 
+                : 'bg-gray-200 dark:bg-gray-700 text-gray-400 cursor-not-allowed'
+            }`}
+          >
+            Apply
+          </button>
+        </div>
+        
+        {/* Preview of what IS currently saved */}
+        <div className="mt-4 flex items-center gap-2 text-xs text-gray-500">
+          <span>Current selection:</span>
+          <div className="p-1 bg-gray-100 dark:bg-gray-700 rounded">
+            <UserIcon iconId={userIconId} size={20} />
+          </div>
+          <span className="font-mono">#{userIconId}</span>
+        </div>
       </div>
-      <div className="border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800 p-4 overflow-y-auto flex-1 min-h-0">
-        <div className="grid grid-cols-7 gap-2">
-          {CLASSIC_ICON_SET.map((iconId) => {
-            const isSelected = iconId === userIconId;
-            const isHovered = iconId === hoveredIconId;
-            
-            return (
-              <div
-                key={iconId}
-                ref={isSelected ? selectedIconRef : null}
-                onClick={() => setUserIconId(iconId)}
-                onMouseEnter={() => setHoveredIconId(iconId)}
-                onMouseLeave={() => setHoveredIconId(null)}
-                className={`
-                  p-2 rounded cursor-pointer transition-colors
-                  ${isSelected 
-                    ? 'bg-blue-500 ring-2 ring-blue-600' 
-                    : isHovered 
-                      ? 'bg-blue-100 dark:bg-blue-900/30' 
-                      : 'bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600'
-                  }
-                `}
-                title={`Icon ${iconId}`}
-              >
-                <div className="flex items-center justify-center">
-                  <UserIcon iconId={iconId} size={32} />
+
+      <hr className="border-gray-200 dark:border-gray-700" />
+
+      {/* Grid Selection Section */}
+      <div>
+        <div className="mb-4">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            Quick Select:
+          </p>
+        </div>
+        <div className="border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800 p-4 max-h-[350px] overflow-y-auto">
+          <div className="grid grid-cols-7 gap-2">
+            {CLASSIC_ICON_SET.map((iconId) => {
+              const isSelected = iconId === userIconId;
+              const isHovered = iconId === hoveredIconId;
+              
+              return (
+                <div
+                  key={iconId}
+                  ref={isSelected ? selectedIconRef : null}
+                  onClick={() => setUserIconId(iconId)}
+                  onMouseEnter={() => setHoveredIconId(iconId)}
+                  onMouseLeave={() => setHoveredIconId(null)}
+                  className={`
+                    p-2 rounded cursor-pointer transition-colors
+                    ${isSelected 
+                      ? 'bg-blue-500 ring-2 ring-blue-600' 
+                      : isHovered 
+                        ? 'bg-blue-100 dark:bg-blue-900/30' 
+                        : 'bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600'
+                    }
+                  `}
+                >
+                  <div className="flex items-center justify-center">
+                    <UserIcon iconId={iconId} size={32} />
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       </div>
     </div>
   );
 }
-
