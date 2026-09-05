@@ -1150,7 +1150,7 @@ async fn public_url_response(url: &str, accept: &str) -> Result<(reqwest::Respon
         validate_public_addresses(&addrs)?;
         let client = pinned_preview_client(host, &addrs)?;
         let response = client.get(current.clone())
-            .header("User-Agent", "HotlineNavigator/0.2.9")
+            .header("User-Agent", concat!("HotlineNavigator/", env!("CARGO_PKG_VERSION")))
             .header("Accept", accept).send().await
             .map_err(|e| format!("Request failed: {e}"))?;
         if response.status().is_redirection() {
