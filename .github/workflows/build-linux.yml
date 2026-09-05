@@ -1,0 +1,118 @@
+name: Build Linux (Cloud)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag to build and attach packages to (blank builds the selected ref as artifacts only)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-linux:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+      RELEASE_TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
+      - name: Validate release version
+        if: env.RELEASE_TAG != ''
+        working-directory: hotline-tauri
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json'));
+          const pkg = JSON.parse(fs.readFileSync('package.json'));
+          if (process.env.RELEASE_TAG !== `v${config.version}` || pkg.version !== config.version) {
+            throw new Error('Release tag and app versions must match');
+          }
+          JS
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf \
+            libssl-dev libgtk-3-dev libayatana-appindicator3-dev \
+            build-essential pkg-config xdg-utils libfuse2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hotline-tauri/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: hotline-tauri/src-tauri
+          key: linux-${{ matrix.arch }}
+
+      - name: Install frontend dependencies
+        working-directory: hotline-tauri
+        run: npm ci
+
+      - name: Check types and frontend tests
+        working-directory: hotline-tauri
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Test Rust
+        working-directory: hotline-tauri/src-tauri
+        run: cargo test --lib
+
+      - name: Build Debian and AppImage packages
+        working-directory: hotline-tauri
+        run: npx tauri build --bundles deb,appimage
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotline-navigator-Linux-${{ matrix.arch }}
+          path: |
+            hotline-tauri/src-tauri/target/release/bundle/deb/*.deb
+            hotline-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Attach packages to existing release
+        if: env.RELEASE_TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null
+          gh release upload "$RELEASE_TAG" \
+            hotline-tauri/src-tauri/target/release/bundle/deb/*.deb \
+            hotline-tauri/src-tauri/target/release/bundle/appimage/*.AppImage
