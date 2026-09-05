@@ -1,5 +1,14 @@
 import { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type { Bookmark } from '../../types';
+
+interface Discovery {
+  dataPort: number;
+  tlsPort?: number;
+  software?: { name: string; version?: string };
+  transport: Record<string, { supported?: boolean; required?: boolean }>;
+  capabilities: Record<string, boolean>;
+}
 
 interface BookmarkInfoDialogProps {
   bookmark: Bookmark;
@@ -8,6 +17,18 @@ interface BookmarkInfoDialogProps {
 
 export default function BookmarkInfoDialog({ bookmark, onClose }: BookmarkInfoDialogProps) {
   const [visible, setVisible] = useState(false);
+  const [discovery, setDiscovery] = useState<Discovery | null>(null);
+  const [discoveryStatus, setDiscoveryStatus] = useState('Checking…');
+  useEffect(() => {
+    if (bookmark.type === 'tracker' || bookmark.port === 5498) return;
+    let current = true;
+    setDiscovery(null);
+    setDiscoveryStatus('Checking…');
+    invoke<Discovery>('discover_server', { address: bookmark.address, port: bookmark.port })
+      .then(info => { if (current) { setDiscovery(info); setDiscoveryStatus('Available'); } })
+      .catch(() => { if (current) setDiscoveryStatus('Not advertised'); });
+    return () => { current = false; };
+  }, [bookmark.address, bookmark.port, bookmark.type]);
 
   useEffect(() => {
     requestAnimationFrame(() => setVisible(true));
@@ -45,6 +66,21 @@ export default function BookmarkInfoDialog({ bookmark, onClose }: BookmarkInfoDi
 
   if (bookmark.hope) {
     rows.push({ label: 'HOPE', value: 'Enabled' });
+  }
+
+  if (!isTracker) {
+    rows.push({ label: 'Discovery', value: discoveryStatus });
+    if (discovery) {
+      if (discovery.software) rows.push({ label: 'Software', value: [discovery.software.name, discovery.software.version].filter(Boolean).join(' ') });
+      rows.push({ label: 'Data port', value: String(discovery.dataPort) });
+      if (discovery.tlsPort) rows.push({ label: 'TLS port', value: String(discovery.tlsPort) });
+      const transport = Object.entries(discovery.transport).filter(([, value]) => value.supported || value.required)
+        .map(([name, value]) => `${name.toUpperCase()}${value.required ? ' (required)' : ''}`);
+      if (transport.length) rows.push({ label: 'Offers', value: transport.join(', ') });
+      const labels: Record<string, string> = { largeFiles: 'Large files', inlineMedia: 'Inline images', voice: 'Voice', chatHistory: 'Chat history', coloredNicks: 'Nickname colors' };
+      const features = Object.entries(discovery.capabilities).filter(([key, value]) => value && labels[key]).map(([key]) => labels[key]);
+      if (features.length) rows.push({ label: 'Features', value: features.join(', ') });
+    }
   }
 
   rows.push({ label: 'Type', value: isTracker ? 'Tracker' : 'Server' });

@@ -155,6 +155,7 @@ pub fn run() {
             commands::download_banner,
             commands::read_preview_file,
             commands::fetch_tracker_servers,
+            commands::discover_server,
             commands::get_server_info,
             commands::get_user_access,
             commands::get_client_info,

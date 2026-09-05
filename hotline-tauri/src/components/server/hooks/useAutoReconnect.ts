@@ -1,3 +1,4 @@
+import { getPassword } from '../../../utils/passwordVault';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { usePreferencesStore } from '../../../stores/preferencesStore';
@@ -243,9 +244,10 @@ export function useAutoReconnect({
 
     const results = await Promise.allSettled(
       trackers.map(async (tracker) => {
+        const savedTracker = useAppStore.getState().bookmarks.find(b => b.id === tracker.id);
         const servers = await invoke<{ address: string; port: number; users: number; name: string | null; description: string | null }[]>(
           'fetch_tracker_servers',
-          { address: tracker.address, port: tracker.port || undefined },
+          { address: tracker.address, port: tracker.port || undefined, tls: savedTracker?.tls ?? false, login: savedTracker?.login || 'guest', password: savedTracker?.hasPassword ? await getPassword(tracker.id) : (savedTracker?.password || null) },
         );
         return { trackerName: tracker.name, servers };
       })

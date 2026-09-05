@@ -215,6 +215,9 @@ export default function BookmarkList({ bookmarks, searchQuery = '' }: BookmarkLi
       const servers = await invoke<TrackerServer[]>('fetch_tracker_servers', {
         address: tracker.address,
         port: tracker.port || undefined,
+        tls: tracker.tls ?? false,
+        login: tracker.login || 'guest',
+        password: tracker.hasPassword ? await getPassword(tracker.id) : (tracker.password || null),
       });
       
       // Convert TrackerServer to ServerBookmark format

@@ -28,6 +28,7 @@ encoding_rs = "0.8"
 base64 = "0.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-rustls = "0.26"
+webpki-roots = "1"
 rustls = { version = "0.23", features = ["ring"] }
 openssl = { version = "0.10", features = ["vendored"] }
 tokio-openssl = "0.6"

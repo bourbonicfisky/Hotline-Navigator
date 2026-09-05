@@ -1,3 +1,4 @@
+pub mod discovery;
 pub mod dates;
 // Hotline protocol implementation
 

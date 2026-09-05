@@ -750,9 +750,12 @@ pub async fn read_preview_file(path: String, app: tauri::AppHandle) -> Result<Pr
 pub async fn fetch_tracker_servers(
     address: String,
     port: Option<u16>,
+    tls: Option<bool>,
+    login: Option<String>,
+    password: Option<String>,
 ) -> Result<Vec<crate::protocol::types::TrackerServer>, String> {
     println!("Command: fetch_tracker_servers from {}:{}", address, port.unwrap_or(5498));
-    TrackerClient::fetch_servers(&address, port).await
+    TrackerClient::fetch_servers(&address, port, tls.unwrap_or(false), login.as_deref().unwrap_or("guest"), password.as_deref().unwrap_or("")).await
 }
 
 #[tauri::command]
@@ -1466,4 +1469,9 @@ mod preview_security_tests {
         assert!(public_url_response("http://127.0.0.1:1/", "image/*").await.is_err());
         assert!(public_url_response("file:///etc/passwd", "image/*").await.is_err());
     }
+}
+
+#[tauri::command]
+pub async fn discover_server(address: String, port: u16) -> Result<crate::protocol::discovery::Descriptor, String> {
+    crate::protocol::discovery::discover(&address, port).await
 }
