@@ -1,68 +1,91 @@
-// Secure password storage using Stronghold vault
-// Passwords are stored encrypted, keyed by bookmark ID.
-
+// Bookmark credentials use a user-provided passphrase, retained only by the
+// unlocked Stronghold instance for this session. The legacy key is migration-only.
 import { Stronghold } from '@tauri-apps/plugin-stronghold';
 import { appDataDir } from '@tauri-apps/api/path';
+import { invoke } from '@tauri-apps/api/core';
+import { create } from 'zustand';
+import type { Bookmark } from '../types';
 
-const VAULT_PASSWORD = 'hotline-navigator-passwords-v1';
-
-let strongholdInstance: Stronghold | null = null;
+interface VaultPrompt {
+  mode: 'create' | 'unlock' | null;
+  submit: (passphrase: string) => Promise<boolean>;
+  cancel: () => void;
+}
+export const usePasswordVaultPrompt = create<VaultPrompt>(() => ({
+  mode: null, submit: async () => false, cancel: () => {},
+}));
+let instance: Stronghold | null = null;
 let initPromise: Promise<Stronghold> | null = null;
-
-async function getStronghold(): Promise<Stronghold> {
-  if (strongholdInstance) return strongholdInstance;
-  if (initPromise) return initPromise;
-
-  initPromise = (async () => {
-    const dir = await appDataDir();
-    const path = `${dir}/bookmark-passwords.hold`;
-    const sh = await Stronghold.load(path, VAULT_PASSWORD);
-    strongholdInstance = sh;
-    return sh;
-  })();
-
-  return initPromise;
-}
-
-async function getStore() {
-  const sh = await getStronghold();
-  let client;
-  try {
-    client = await sh.loadClient('passwords');
-  } catch {
-    client = await sh.createClient('passwords');
-  }
-  return client.getStore();
-}
-
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+async function passwordStore(sh: Stronghold, createClient = false) {
+  if (createClient) return (await sh.createClient('passwords')).getStore();
+  return (await sh.loadClient('passwords')).getStore();
+}
+
+async function initialize(): Promise<Stronghold> {
+  const dir = await appDataDir();
+  const status = await invoke<{ protectedExists: boolean; legacyExists: boolean }>('bookmark_vault_status');
+  return new Promise((resolve, reject) => {
+    usePasswordVaultPrompt.setState({
+      mode: status.protectedExists ? 'unlock' : 'create',
+      cancel: () => {
+        usePasswordVaultPrompt.setState({ mode: null });
+        reject(new Error('Saved passwords remain locked.'));
+      },
+      submit: async (passphrase) => {
+        let sh: Stronghold | null = null;
+        try {
+          sh = await Stronghold.load(`${dir}/bookmark-passwords-v2.hold`, passphrase);
+          const store = await passwordStore(sh, !status.protectedExists);
+          if (status.legacyExists) {
+            const old = await Stronghold.load(`${dir}/bookmark-passwords.hold`, 'hotline-navigator-passwords-v1');
+            try {
+              const oldStore = await passwordStore(old);
+              const bookmarks = await invoke<Bookmark[]>('get_bookmarks');
+              for (const bookmark of bookmarks) {
+                const bytes = await oldStore.get(bookmark.id);
+                if (bytes && !(await store.get(bookmark.id))) {
+                  await store.insert(bookmark.id, Array.from(bytes));
+                }
+              }
+            } finally { await old.unload(); }
+          }
+          await sh.save();
+          status.protectedExists = true;
+          // Only remove the legacy copy after the protected snapshot is durable.
+          if (status.legacyExists) await invoke('finish_bookmark_vault_migration');
+          instance = sh;
+          usePasswordVaultPrompt.setState({ mode: null });
+          resolve(sh);
+          return true;
+        } catch {
+          if (sh) await sh.unload().catch(() => {});
+          usePasswordVaultPrompt.setState({ mode: status.protectedExists ? 'unlock' : 'create' });
+          return false;
+        }
+      },
+    });
+  });
+}
+async function getStronghold(): Promise<Stronghold> {
+  if (instance) return instance;
+  if (!initPromise) initPromise = initialize().finally(() => { initPromise = null; });
+  return initPromise;
+}
 export async function savePassword(bookmarkId: string, password: string): Promise<void> {
-  const store = await getStore();
-  await store.insert(bookmarkId, Array.from(encoder.encode(password)));
   const sh = await getStronghold();
+  await (await passwordStore(sh)).insert(bookmarkId, Array.from(encoder.encode(password)));
   await sh.save();
 }
-
 export async function getPassword(bookmarkId: string): Promise<string | null> {
-  try {
-    const store = await getStore();
-    const data = await store.get(bookmarkId);
-    if (!data) return null;
-    return decoder.decode(data);
-  } catch {
-    return null;
-  }
+  const sh = await getStronghold();
+  const data = await (await passwordStore(sh)).get(bookmarkId);
+  return data ? decoder.decode(data) : null;
 }
-
 export async function deletePassword(bookmarkId: string): Promise<void> {
-  try {
-    const store = await getStore();
-    await store.remove(bookmarkId);
-    const sh = await getStronghold();
-    await sh.save();
-  } catch {
-    // Ignore if key doesn't exist
-  }
+  const sh = await getStronghold();
+  await (await passwordStore(sh)).remove(bookmarkId);
+  await sh.save();
 }

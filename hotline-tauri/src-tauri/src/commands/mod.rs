@@ -1102,19 +1102,22 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || v4.is_private()                                // 10/8, 172.16/12, 192.168/16
                 || v4.is_link_local()                             // 169.254/16
                 || v4.is_broadcast()                              // 255.255.255.255
+                || v4.is_multicast()
+                || v4.octets()[0] == 0
+                || v4.octets()[0] >= 240
                 || v4.is_unspecified()                            // 0.0.0.0
                 || *v4 == Ipv4Addr::new(0, 0, 0, 0)
                 || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64  // 100.64/10 (CGNAT)
                 || v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0  // 192.0.0/24
         }
         IpAddr::V6(v6) => {
-            v6.is_loopback()                                      // ::1
+            v6.is_multicast() || v6.is_loopback()                                      // ::1
                 || v6.is_unspecified()                            // ::
                 || *v6 == Ipv6Addr::LOCALHOST
                 || {
                     let segs = v6.segments();
                     (segs[0] & 0xfe00) == 0xfc00                  // fc00::/7 (ULA)
-                        || (segs[0] == 0xfe80)                    // fe80::/10 (link-local)
+                        || ((segs[0] & 0xffc0) == 0xfe80)                    // fe80::/10 (link-local)
                         || (segs[0] == 0 && segs[1] == 0 && segs[2] == 0
                             && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xffff) // ::ffff:0:0/96 (v4-mapped, check inner)
                             && is_private_ip(&IpAddr::V4(std::net::Ipv4Addr::new(
@@ -1126,38 +1129,68 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// Resolve hostname and reject private/internal IPs before fetching.
-async fn validate_url_target(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| format!("Invalid URL: {e}"))?;
-
-    // Only allow http/https
-    match parsed.scheme() {
-        "http" | "https" => {}
-        s => return Err(format!("Blocked scheme: {s}")),
-    }
-
-    let host = parsed.host_str().ok_or("URL has no host")?;
-    let port = parsed.port_or_known_default().unwrap_or(80);
-
-    // Resolve DNS and check all returned addresses
-    use tokio::net::lookup_host;
-    let addrs: Vec<std::net::SocketAddr> = lookup_host(format!("{host}:{port}"))
-        .await
-        .map_err(|e| format!("DNS resolution failed: {e}"))?
-        .collect();
-
-    if addrs.is_empty() {
-        return Err("DNS resolved to no addresses".to_string());
-    }
-
-    for addr in &addrs {
-        if is_private_ip(&addr.ip()) {
-            return Err("URL resolves to a private/internal IP address".to_string());
+/// Resolve once and pin the checked addresses to this request. Redirects must
+/// repeat this process; proxies are disabled because they resolve independently.
+async fn public_url_response(url: &str, accept: &str) -> Result<(reqwest::Response, reqwest::Url), String> {
+    let mut current = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    for _ in 0..5 {
+        if !matches!(current.scheme(), "http" | "https") {
+            return Err("Only HTTP and HTTPS previews are supported".into());
         }
+        let host = current.host_str().ok_or("URL has no host")?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let port = current.port_or_known_default().ok_or("URL has no port")?;
+        let addrs: Vec<std::net::SocketAddr> = tokio::time::timeout(
+            std::time::Duration::from_secs(5), tokio::net::lookup_host((host, port)),
+        ).await.map_err(|_| "DNS resolution timed out")?
+            .map_err(|e| format!("DNS resolution failed: {e}"))?.collect();
+        validate_public_addresses(&addrs)?;
+        let client = pinned_preview_client(host, &addrs)?;
+        let response = client.get(current.clone())
+            .header("User-Agent", "HotlineNavigator/0.2.9")
+            .header("Accept", accept).send().await
+            .map_err(|e| format!("Request failed: {e}"))?;
+        if response.status().is_redirection() {
+            let location = response.headers().get("location")
+                .and_then(|v| v.to_str().ok()).ok_or("Redirect has no valid location")?;
+            current = current.join(location).map_err(|e| format!("Invalid redirect: {e}"))?;
+            continue;
+        }
+        return Ok((response, current));
     }
+    Err("Too many redirects".into())
+}
 
+fn validate_public_addresses(addrs: &[std::net::SocketAddr]) -> Result<(), String> {
+    if addrs.is_empty() || addrs.iter().any(|addr| is_private_ip(&addr.ip())) {
+        return Err("URL has no public-only destination".into());
+    }
     Ok(())
+}
+
+fn pinned_preview_client(host: &str, addrs: &[std::net::SocketAddr]) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder().no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, addrs).build().map_err(|e| format!("HTTP client error: {e}"))
+}
+
+/// Read no more than the cap into memory. HTML needs only a prefix; images
+/// must be complete and are rejected as soon as they exceed the cap.
+async fn read_preview_body(mut response: reqwest::Response, cap: usize, prefix: bool) -> Result<Vec<u8>, String> {
+    if !prefix && response.content_length().is_some_and(|len| len > cap as u64) {
+        return Err("Preview exceeds download size limit".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Read error: {e}"))? {
+        let remaining = cap - bytes.len();
+        if chunk.len() > remaining && !prefix {
+            return Err("Preview exceeds download size limit".into());
+        }
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if prefix && bytes.len() == cap { break; }
+    }
+    Ok(bytes)
 }
 
 fn is_supported_external_image_mime(mime: &str) -> bool {
@@ -1169,46 +1202,7 @@ fn is_supported_external_image_mime(mime: &str) -> bool {
 
 #[tauri::command]
 pub async fn fetch_link_preview(url: String) -> Result<LinkPreviewData, String> {
-    // Validate URL target before fetching — blocks private IPs, non-http schemes
-    validate_url_target(&url).await?;
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none()) // Handle redirects manually to check each hop
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    // Follow redirects manually, validating each hop (max 5)
-    let mut current_url = url.clone();
-    let mut response = None;
-    for _ in 0..5 {
-        let resp = client
-            .get(&current_url)
-            .header("User-Agent", "Mozilla/5.0 (compatible; HotlineNavigator/0.2.7)")
-            .header("Accept", "text/html")
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {e}"))?;
-
-        if resp.status().is_redirection() {
-            if let Some(location) = resp.headers().get("location").and_then(|v| v.to_str().ok()) {
-                // Resolve relative redirects against current URL
-                let next = reqwest::Url::parse(location)
-                    .or_else(|_| reqwest::Url::parse(&current_url).and_then(|base| base.join(location)))
-                    .map_err(|e| format!("Invalid redirect URL: {e}"))?;
-                let next_str = next.to_string();
-                // Validate the redirect target
-                validate_url_target(&next_str).await?;
-                current_url = next_str;
-                continue;
-            }
-        }
-
-        response = Some(resp);
-        break;
-    }
-
-    let response = response.ok_or("Too many redirects")?;
+    let (response, final_url) = public_url_response(&url, "text/html").await?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
@@ -1231,8 +1225,8 @@ pub async fn fetch_link_preview(url: String) -> Result<LinkPreviewData, String> 
     }
 
     // Read up to 64KB to find OG tags (they're in <head>)
-    let bytes = response.bytes().await.map_err(|e| format!("Read error: {e}"))?;
-    let html = String::from_utf8_lossy(&bytes[..bytes.len().min(65536)]);
+    let bytes = read_preview_body(response, 65536, true).await?;
+    let html = String::from_utf8_lossy(&bytes);
 
     fn extract_meta(html: &str, property: &str) -> Option<String> {
         // Match <meta property="og:X" content="..."> or <meta content="..." property="og:X">
@@ -1289,7 +1283,10 @@ pub async fn fetch_link_preview(url: String) -> Result<LinkPreviewData, String> 
     // Fallbacks
     let title = og_title.or_else(|| extract_meta(&html, "twitter:title")).or_else(|| extract_title(&html));
     let description = og_description.or_else(|| extract_meta(&html, "twitter:description")).or_else(|| extract_meta(&html, "description"));
-    let image = og_image.or_else(|| extract_meta(&html, "twitter:image"));
+    let image = og_image.or_else(|| extract_meta(&html, "twitter:image"))
+        .and_then(|image| final_url.join(&image).ok())
+        .filter(|image| matches!(image.scheme(), "http" | "https"))
+        .map(|image| image.to_string());
 
     Ok(LinkPreviewData {
         url,
@@ -1304,42 +1301,7 @@ pub async fn fetch_link_preview(url: String) -> Result<LinkPreviewData, String> 
 pub async fn fetch_external_image(url: String) -> Result<ExternalImageData, String> {
     const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
-    validate_url_target(&url).await?;
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let mut current_url = url.clone();
-    let mut response = None;
-    for _ in 0..5 {
-        let resp = client
-            .get(&current_url)
-            .header("User-Agent", "Mozilla/5.0 (compatible; HotlineNavigator/0.2.9)")
-            .header("Accept", "image/*")
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {e}"))?;
-
-        if resp.status().is_redirection() {
-            if let Some(location) = resp.headers().get("location").and_then(|v| v.to_str().ok()) {
-                let next = reqwest::Url::parse(location)
-                    .or_else(|_| reqwest::Url::parse(&current_url).and_then(|base| base.join(location)))
-                    .map_err(|e| format!("Invalid redirect URL: {e}"))?;
-                let next_str = next.to_string();
-                validate_url_target(&next_str).await?;
-                current_url = next_str;
-                continue;
-            }
-        }
-
-        response = Some(resp);
-        break;
-    }
-
-    let response = response.ok_or("Too many redirects")?;
+    let (response, current_url) = public_url_response(&url, "image/*").await?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
@@ -1360,10 +1322,7 @@ pub async fn fetch_external_image(url: String) -> Result<ExternalImageData, Stri
         .unwrap_or("")
         .to_string();
 
-    let bytes = response.bytes().await.map_err(|e| format!("Read error: {e}"))?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err("Image is larger than the 8 MB preview limit".to_string());
-    }
+    let bytes = read_preview_body(response, MAX_IMAGE_BYTES, false).await?;
 
     let detected_mime = detect_mime_from_content(&bytes)
         .or_else(|| {
@@ -1373,7 +1332,7 @@ pub async fn fetch_external_image(url: String) -> Result<ExternalImageData, Stri
                 None
             }
         })
-        .unwrap_or_else(|| guess_mime(&current_url, Some(&bytes)));
+        .unwrap_or_else(|| guess_mime(current_url.as_str(), Some(&bytes)));
 
     if !is_supported_external_image_mime(detected_mime) {
         return Err(format!("Unsupported image type: {}", detected_mime));
@@ -1419,4 +1378,72 @@ pub async fn mnemosyne_fetch(url: String) -> Result<serde_json::Value, String> {
     }
 
     Ok(body)
+}
+
+#[tauri::command]
+pub fn bookmark_vault_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "protectedExists": dir.join("bookmark-passwords-v2.hold").try_exists().map_err(|e| e.to_string())?,
+        "legacyExists": dir.join("bookmark-passwords.hold").try_exists().map_err(|e| e.to_string())?,
+    }))
+}
+
+#[tauri::command]
+pub fn finish_bookmark_vault_migration(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    if !dir.join("bookmark-passwords-v2.hold").is_file() {
+        return Err("Protected password vault has not been saved".into());
+    }
+    match std::fs::remove_file(dir.join("bookmark-passwords.hold")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Could not remove legacy password vault: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod preview_security_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn rejects_private_mixed_and_mapped_destinations() {
+        for ip in ["127.0.0.1", "10.0.0.1", "169.254.169.254", "0.1.2.3", "::1", "::ffff:127.0.0.1", "febf::1", "fc00::1"] {
+            let addr = std::net::SocketAddr::new(ip.parse().unwrap(), 80);
+            assert!(validate_public_addresses(&["8.8.8.8:80".parse().unwrap(), addr]).is_err(), "{ip}");
+        }
+        assert!(validate_public_addresses(&[]).is_err());
+        assert!(validate_public_addresses(&["8.8.8.8:80".parse().unwrap()]).is_ok());
+    }
+
+    // Local fixture deliberately bypasses address validation to exercise the
+    // production pinning and streaming code without touching public services.
+    async fn fixture() -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n8\r\nabcdefgh\r\n8\r\nijklmnop\r\n0\r\n\r\n").await.unwrap();
+        });
+        // This hostname has no DNS record; success proves the supplied address
+        // is used while the original hostname remains in the URL.
+        pinned_preview_client("pinned.invalid", &[addr]).unwrap()
+            .get(format!("http://pinned.invalid:{}/", addr.port())).send().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn enforces_cap_without_content_length() {
+        assert!(read_preview_body(fixture().await, 10, false).await.is_err());
+        assert_eq!(read_preview_body(fixture().await, 10, true).await.unwrap(), b"abcdefghij");
+        assert_eq!(read_preview_body(fixture().await, 16, false).await.unwrap(), b"abcdefghijklmnop");
+    }
+
+    #[tokio::test]
+    async fn rejects_private_urls_and_schemes_before_connecting() {
+        assert!(public_url_response("http://127.0.0.1:1/", "image/*").await.is_err());
+        assert!(public_url_response("file:///etc/passwd", "image/*").await.is_err());
+    }
 }

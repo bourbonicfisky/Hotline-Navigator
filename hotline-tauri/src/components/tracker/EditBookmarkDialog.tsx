@@ -14,6 +14,7 @@ interface EditBookmarkDialogProps {
 export default function EditBookmarkDialog({ bookmark, onClose, mode = 'edit', onSave }: EditBookmarkDialogProps) {
   const { updateBookmark, addBookmark } = useAppStore();
   const [visible, setVisible] = useState(false);
+  const [removePassword, setRemovePassword] = useState(false);
   const [formData, setFormData] = useState({
     name: bookmark.name,
     address: bookmark.address,
@@ -37,7 +38,7 @@ export default function EditBookmarkDialog({ bookmark, onClose, mode = 'edit', o
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    const hasNewPassword = !!formData.password;
+    const hasNewPassword = !removePassword && !!formData.password;
     const finalBookmark: Bookmark = {
       ...bookmark,
       name: formData.name || `${formData.address}:${formData.port}`,
@@ -56,8 +57,8 @@ export default function EditBookmarkDialog({ bookmark, onClose, mode = 'edit', o
       // Store password in secure vault
       if (hasNewPassword) {
         await savePassword(bookmark.id, formData.password);
-      } else if (!formData.password && bookmark.hasPassword) {
-        // User cleared the password field — remove from vault
+      } else if (removePassword && bookmark.hasPassword) {
+        // Only an explicit removal deletes a stored credential.
         await deletePassword(bookmark.id);
         finalBookmark.hasPassword = false;
       }
@@ -209,6 +210,10 @@ export default function EditBookmarkDialog({ bookmark, onClose, mode = 'edit', o
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder={bookmark.hasPassword ? 'Stored securely — leave empty to keep' : 'Optional'}
             />
+            {bookmark.hasPassword && <label className="mt-2 flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={removePassword} onChange={(e) => setRemovePassword(e.target.checked)} />
+              Remove saved password
+            </label>}
           </div>
 
           <div className="flex gap-3 pt-4">

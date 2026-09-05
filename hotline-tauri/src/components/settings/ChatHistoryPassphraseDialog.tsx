@@ -2,11 +2,12 @@ import { useState, useEffect } from 'react';
 
 interface ChatHistoryPassphraseDialogProps {
   mode: 'create' | 'unlock';
+  purpose?: 'history' | 'passwords';
   onSubmit: (passphrase: string) => Promise<boolean>;
   onCancel: () => void;
 }
 
-export default function ChatHistoryPassphraseDialog({ mode, onSubmit, onCancel }: ChatHistoryPassphraseDialogProps) {
+export default function ChatHistoryPassphraseDialog({ mode, onSubmit, onCancel, purpose = 'history' }: ChatHistoryPassphraseDialogProps) {
   const [visible, setVisible] = useState(false);
   const [passphrase, setPassphrase] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -24,6 +25,7 @@ export default function ChatHistoryPassphraseDialog({ mode, onSubmit, onCancel }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     setError(null);
 
     if (!passphrase) {
@@ -32,8 +34,8 @@ export default function ChatHistoryPassphraseDialog({ mode, onSubmit, onCancel }
     }
 
     if (mode === 'create') {
-      if (passphrase.length < 4) {
-        setError('Passphrase must be at least 4 characters.');
+      if (passphrase.length < (purpose === 'passwords' ? 12 : 4)) {
+        setError(`Passphrase must be at least ${purpose === 'passwords' ? 12 : 4} characters.`);
         return;
       }
       if (passphrase !== confirm) {
@@ -48,14 +50,14 @@ export default function ChatHistoryPassphraseDialog({ mode, onSubmit, onCancel }
 
     if (!success) {
       setError(mode === 'unlock'
-        ? 'Could not unlock vault. Wrong passphrase?'
-        : 'Failed to create vault.');
+        ? 'Could not unlock saved data. Check your passphrase and try again.'
+        : 'Could not protect saved data. Check available disk space and try again.');
     }
   };
 
   return (
     <div
-      onClick={handleClose}
+      onClick={submitting ? undefined : handleClose}
       className={`fixed inset-0 flex items-center justify-center z-50 transition-all duration-300 ease-in-out ${
         visible ? 'bg-black/60 backdrop-blur-sm' : 'bg-black/0 backdrop-blur-none'
       }`}
@@ -68,22 +70,22 @@ export default function ChatHistoryPassphraseDialog({ mode, onSubmit, onCancel }
       >
         <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-            {mode === 'create' ? 'Set Chat History Passphrase' : 'Unlock Chat History'}
+            {purpose === 'passwords' ? (mode === 'create' ? 'Protect Saved Passwords' : 'Unlock Saved Passwords') : (mode === 'create' ? 'Set Chat History Passphrase' : 'Unlock Chat History')}
           </h2>
         </div>
 
         <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
           {mode === 'create' && (
             <p className="text-sm text-gray-600 dark:text-gray-400">
-              Chat history stores the last 1,000 messages per server in an encrypted vault on your device.
+              {purpose === 'passwords' ? 'Your saved server passwords will be encrypted on this device.' : 'Chat history stores the last 1,000 messages per server in an encrypted vault on your device.'}
               Choose a passphrase to protect this data — you'll need it each time you open the app.
-              <span className="font-medium text-amber-600 dark:text-amber-400"> If you forget your passphrase, stored history cannot be recovered.</span>
+              <span className="font-medium text-amber-600 dark:text-amber-400"> If you forget your passphrase, {purpose === 'passwords' ? 'saved passwords cannot be recovered.' : 'stored history cannot be recovered.'}</span>
             </p>
           )}
 
           {mode === 'unlock' && (
             <p className="text-sm text-gray-600 dark:text-gray-400">
-              Enter your passphrase to unlock your encrypted chat history, or skip to continue without it this session.
+              {purpose === 'passwords' ? 'Enter your passphrase to use saved server passwords this session.' : 'Enter your passphrase to unlock your encrypted chat history, or skip to continue without it this session.'}
             </p>
           )}
 
@@ -123,10 +125,10 @@ export default function ChatHistoryPassphraseDialog({ mode, onSubmit, onCancel }
           <div className="flex gap-3 pt-2">
             <button
               type="button"
-              onClick={handleClose}
+              onClick={submitting ? undefined : handleClose}
               className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
             >
-              {mode === 'unlock' ? 'Skip' : 'Cancel'}
+              {mode === 'unlock' && purpose === 'history' ? 'Skip' : 'Cancel'}
             </button>
             <button
               type="submit"

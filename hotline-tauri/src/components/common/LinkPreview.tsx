@@ -21,6 +21,7 @@ function openUrl(url: string) {
 }
 
 export default function LinkPreview({ url }: { url: string }) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [preview, setPreview] = useState<LinkPreviewData | null | undefined>(
     previewCache.has(url) ? previewCache.get(url) : undefined
   );
@@ -52,6 +53,25 @@ export default function LinkPreview({ url }: { url: string }) {
     return () => { cancelled = true; };
   }, [url]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let blobUrl: string | undefined;
+    setImageUrl(null);
+    if (preview?.image) {
+      invoke<{ bytesBase64: string; mime: string }>('fetch_external_image', { url: preview.image })
+        .then(({ bytesBase64, mime }) => {
+          if (cancelled) return;
+          const bytes = Uint8Array.from(atob(bytesBase64), c => c.charCodeAt(0));
+          blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+          setImageUrl(blobUrl);
+        }).catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [preview?.image]);
+
   // Loading or no data
   if (preview === undefined || preview === null) return null;
 
@@ -64,9 +84,9 @@ export default function LinkPreview({ url }: { url: string }) {
       }}
       className="block my-1.5 max-w-[400px] border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer"
     >
-      {preview.image && (
+      {imageUrl && (
         <img
-          src={preview.image}
+          src={imageUrl}
           alt=""
           className="w-full max-h-[200px] object-cover"
           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}

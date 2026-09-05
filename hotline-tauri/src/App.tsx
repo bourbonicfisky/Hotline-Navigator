@@ -1,3 +1,5 @@
+import ChatHistoryPassphraseDialog from './components/settings/ChatHistoryPassphraseDialog';
+import { usePasswordVaultPrompt } from './utils/passwordVault';
 import { useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from './stores/appStore';
@@ -12,6 +14,7 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import NotificationContainer from './components/notifications/NotificationContainer';
 
 function App() {
+  const vaultPrompt = usePasswordVaultPrompt();
   // Initialize dark mode management
   useDarkMode();
 
@@ -137,6 +140,8 @@ function App() {
       
       {/* Notification toasts */}
       <NotificationContainer />
+      {vaultPrompt.mode && <ChatHistoryPassphraseDialog purpose="passwords" mode={vaultPrompt.mode}
+        onSubmit={vaultPrompt.submit} onCancel={vaultPrompt.cancel} />}
     </div>
   );
 }

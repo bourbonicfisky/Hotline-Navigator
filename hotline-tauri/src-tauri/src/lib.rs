@@ -142,6 +142,8 @@ pub fn run() {
             commands::get_news_article_data,
             commands::post_news_article,
             commands::get_bookmarks,
+            commands::bookmark_vault_status,
+            commands::finish_bookmark_vault_migration,
             commands::save_bookmark,
             commands::delete_bookmark,
             commands::reorder_bookmarks,

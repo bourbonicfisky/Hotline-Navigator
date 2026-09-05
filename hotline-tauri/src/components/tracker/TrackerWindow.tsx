@@ -29,8 +29,10 @@ export default function TrackerWindow() {
   // Also migrate any legacy plaintext passwords into the secure vault.
   useEffect(() => {
     const loadBookmarks = async () => {
+      let loadedBookmarks: Bookmark[] | undefined;
       try {
         const savedBookmarks = await invoke<Bookmark[]>('get_bookmarks');
+        loadedBookmarks = savedBookmarks;
         let needsResave = false;
 
         // Migrate legacy plaintext passwords to secure vault
@@ -53,6 +55,7 @@ export default function TrackerWindow() {
 
         setBookmarks(savedBookmarks);
       } catch (error) {
+        if (loadedBookmarks) setBookmarks(loadedBookmarks);
         console.error('Failed to load bookmarks:', error);
       }
     };

@@ -664,3 +664,14 @@ MIT License - See LICENSE file for details
 ---
 
 *Bringing the classic Hotline experience to modern platforms*
+
+### Saved password protection
+
+Saved server passwords require a passphrase (at least 12 characters). Choose it
+when first saving or using a saved password, then unlock once per app session.
+The passphrase is not stored. Forgotten passphrases cannot be recovered.
+
+Existing password-vault entries migrate when the vault is first opened. The old
+snapshot is removed only after the protected snapshot is saved; a failed migration
+leaves the original available for retry. Cancelling leaves saved passwords locked.
+Editing a bookmark keeps its saved password unless **Remove saved password** is selected.
