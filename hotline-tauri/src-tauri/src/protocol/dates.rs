@@ -1,5 +1,5 @@
 /// Decode the Hotline 8-byte date format (`year:2 | msecs:2 | secs:4`) into a
-/// human-readable string. Per the fogWraith Capabilities spec, two wire formats
+/// UTC ISO 8601 string for locale-aware formatting in the UI. Two wire formats
 /// coexist:
 ///
 /// - **Modern**: `year` is the actual year (e.g. 2026); `secs` is seconds since
@@ -10,7 +10,7 @@
 /// Servers select the modern format when capability bit 9 is negotiated. Vintage servers always send the 1904 form.
 /// Returns `None` for sentinel values (year=0).
 pub fn decode_hotline_date(year: u16, secs: u32) -> Option<String> {
-    if year == 0 {
+    if year == 0 || year > 9999 {
         return None;
     }
 
@@ -52,15 +52,8 @@ pub fn decode_hotline_date(year: u16, secs: u32) -> Option<String> {
         return None;
     }
     let day = remaining + 1;
-    let ampm = if hour < 12 { "AM" } else { "PM" };
-    let h12 = if hour == 0 {
-        12
-    } else if hour > 12 {
-        hour - 12
-    } else {
-        hour
-    };
-    Some(format!("{}/{}/{} {}:{:02} {}", month, day, resolved_year, h12, minute, ampm))
+    let second = day_secs % 60;
+    Some(format!("{resolved_year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"))
 }
 
 /// Decode an entire field; malformed widths and absent dates remain unknown.
@@ -76,13 +69,14 @@ mod tests {
     #[test]
     fn file_dates_support_both_encodings_and_unknown_values() {
         let modern = [0x07, 0xEA, 0, 0, 0, 0, 0, 0];
-        assert_eq!(decode_date_field(&modern).as_deref(), Some("1/1/2026 12:00 AM"));
+        assert_eq!(decode_date_field(&modern).as_deref(), Some("2026-01-01T00:00:00Z"));
         let mut legacy = vec![0x07, 0x70, 0, 0];
         legacy.extend_from_slice(&3_850_070_400u32.to_be_bytes());
         assert_eq!(decode_date_field(&legacy), decode_date_field(&modern));
         assert_eq!(decode_date_field(&[0; 8]), None);
         assert_eq!(decode_date_field(&[0; 4]), None);
         assert_eq!(decode_hotline_date(2026, 400 * 86400), None);
-        assert_eq!(decode_hotline_date(1904, 0).as_deref(), Some("1/1/1904 12:00 AM"));
+        assert_eq!(decode_hotline_date(1904, 0).as_deref(), Some("1904-01-01T00:00:00Z"));
+        assert_eq!(decode_hotline_date(10000, 1), None);
     }
 }

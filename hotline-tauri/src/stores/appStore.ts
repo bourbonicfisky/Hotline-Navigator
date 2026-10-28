@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { Bookmark, ConnectionStatus, MnemosyneBookmark, TrackerBookmark, Transfer } from '../types';
 import { usePreferencesStore } from './preferencesStore';
+import { withBookmarkPassword } from '../utils/bookmarkCredentials';
 
 const MNEMOSYNE_BOOKMARKS_STORAGE_KEY = 'mnemosyne-bookmarks';
 const HOTLINE_PREFERENCES_STORAGE_KEY = 'hotline-preferences';
@@ -322,7 +323,7 @@ export const useAppStore = create<AppState>((set) => ({
     // Reconnect with same bookmark
     try {
       await invoke('connect_to_server', {
-        bookmark,
+        bookmark: await withBookmarkPassword(bookmark),
         username,
         userIconId,
         autoDetectTls: autoDetectTls && !bookmark.tls,

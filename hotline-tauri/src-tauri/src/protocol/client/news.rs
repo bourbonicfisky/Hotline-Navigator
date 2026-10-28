@@ -753,7 +753,7 @@ mod tests {
     fn modern_format_jan_1_midnight() {
         assert_eq!(
             decode_hotline_date(2026, 1).unwrap(),
-            "1/1/2026 12:00 AM"
+            "2026-01-01T00:00:01Z"
         );
     }
 
@@ -765,7 +765,7 @@ mod tests {
         // plus 13.5 hours = 13.5*3600 = 48,600
         // total = 16,896,600
         let result = decode_hotline_date(2026, 16_896_600).unwrap();
-        assert_eq!(result, "7/15/2026 1:30 PM");
+        assert_eq!(result, "2026-07-15T13:30:00Z");
     }
 
     #[test]
@@ -773,7 +773,7 @@ mod tests {
         // year=1904, secs=1 → 1904-01-01 00:00:01
         assert_eq!(
             decode_hotline_date(1904, 1).unwrap(),
-            "1/1/1904 12:00 AM"
+            "1904-01-01T00:00:01Z"
         );
     }
 
@@ -786,7 +786,7 @@ mod tests {
         // Actually 1904 IS leap (divisible by 4, not century). So 366 days = 31_622_400
         // gets to 1905-01-01.
         let result = decode_hotline_date(1904, 31_622_400).unwrap();
-        assert_eq!(result, "1/1/1905 12:00 AM");
+        assert_eq!(result, "1905-01-01T00:00:00Z");
     }
 
     #[test]
@@ -800,7 +800,7 @@ mod tests {
         // Total secs = 91*365*86400 + 31*366*86400 = 91*31_536_000 + 31*31_622_400
         //            = 2_869_776_000 + 980_294_400 = 3_850_070_400
         let result = decode_hotline_date(1904, 3_850_070_400).unwrap();
-        assert_eq!(result, "1/1/2026 12:00 AM");
+        assert_eq!(result, "2026-01-01T00:00:00Z");
     }
 
     #[test]
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn secs_zero_returns_none() {
-        assert_eq!(decode_hotline_date(2026, 0).as_deref(), Some("1/1/2026 12:00 AM"));
+        assert_eq!(decode_hotline_date(2026, 0).as_deref(), Some("2026-01-01T00:00:00Z"));
     }
 
     #[test]
@@ -819,7 +819,7 @@ mod tests {
         // Jan(31) + 28 days into Feb = 59 days. + 12 hours.
         // secs = 59*86400 + 12*3600 = 5_097_600 + 43_200 = 5_140_800
         let result = decode_hotline_date(2024, 5_140_800).unwrap();
-        assert_eq!(result, "2/29/2024 12:00 PM");
+        assert_eq!(result, "2024-02-29T12:00:00Z");
     }
 }
 

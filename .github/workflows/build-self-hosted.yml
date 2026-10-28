@@ -1,19 +1,33 @@
-name: 'Build (Self-Hosted)'
+name: 'Build macOS, iOS and Android'
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build
+        type: choice
+        default: all
+        options:
+          - all
+          - macos
+          - ios
+          - android
 
 concurrency:
-  group: self-hosted-${{ github.workflow }}-${{ github.ref }}
+  group: hosted-${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform || 'all' }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   # ─── Lint & Test ─────────────────────────────────────────────────
   check:
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -25,6 +39,17 @@ jobs:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: hotline-tauri/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: hotline-tauri/src-tauri
+          key: ${{ github.job }}
 
       - name: Install frontend dependencies
         working-directory: hotline-tauri
@@ -44,16 +69,18 @@ jobs:
 
       - name: Cargo clippy
         working-directory: hotline-tauri/src-tauri
-        run: cargo clippy
+        run: cargo clippy --locked
 
       - name: Cargo test
         working-directory: hotline-tauri/src-tauri
-        run: cargo test
+        run: cargo test --locked
 
   # ─── macOS Universal Binary ────────────────────────────────────────
   build-macos:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'macos'
     needs: check
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
+    timeout-minutes: 90
     permissions:
       contents: write
 
@@ -68,8 +95,19 @@ jobs:
           cache: 'npm'
           cache-dependency-path: hotline-tauri/package-lock.json
 
-      - name: Add x86_64 Rust target
-        run: rustup target add x86_64-apple-darwin
+      - name: Add macOS Rust targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: hotline-tauri/src-tauri
+          key: ${{ github.job }}
 
       - name: Install frontend dependencies
         working-directory: hotline-tauri
@@ -112,7 +150,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx tauri build --target universal-apple-darwin
+        run: npx tauri build --target universal-apple-darwin -- --locked
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -142,8 +180,10 @@ jobs:
 
   # ─── iOS / iPadOS (Unsigned) ───────────────────────────────────────
   build-ios:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'ios'
     needs: check
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
+    timeout-minutes: 90
     permissions:
       contents: write
 
@@ -161,9 +201,25 @@ jobs:
       - name: Add iOS Rust target
         run: rustup target add aarch64-apple-ios
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: hotline-tauri/src-tauri
+          key: ${{ github.job }}
+
       - name: Install frontend dependencies
         working-directory: hotline-tauri
         run: npm ci
+
+      - name: Disable iOS signing for sideload archive
+        run: |
+          printf 'CODE_SIGNING_ALLOWED = NO\nCODE_SIGNING_REQUIRED = NO\nCODE_SIGN_IDENTITY =\n' > "$RUNNER_TEMP/unsigned.xcconfig"
+          echo "XCODE_XCCONFIG_FILE=$RUNNER_TEMP/unsigned.xcconfig" >> "$GITHUB_ENV"
 
       - name: Build iOS app (unsigned archive, for sideloading)
         working-directory: hotline-tauri
@@ -171,7 +227,10 @@ jobs:
         # we have no Apple account/profile configured. Instead we catch the
         # expected export failure and package the .app directly from the
         # archive into a sideload-ready IPA.
-        run: npx tauri ios build --export-method debugging || true
+        run: |
+          # Export requires a provisioning profile; archive validation below
+          # must still fail the job if compilation did not produce a real app.
+          npx tauri ios build --ci --export-method debugging || echo "Checking unsigned archive after export failure"
 
       - name: Package unsigned IPA from archive
         run: |
@@ -190,6 +249,8 @@ jobs:
             exit 1
           fi
           echo "Found app at: $APP"
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          test -s "$APP/$EXECUTABLE"
           mkdir -p Payload
           cp -R "$APP" Payload/
           zip -qr hotline-navigator-unsigned.ipa Payload
@@ -215,8 +276,10 @@ jobs:
 
   # ─── Android (unsigned APK for sideloading) ────────────────────────
   build-android:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android'
     needs: check
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     permissions:
       contents: write
 
@@ -233,7 +296,18 @@ jobs:
 
       - name: Add Android Rust targets
         run: |
-          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: hotline-tauri/src-tauri
+          key: ${{ github.job }}
 
       - name: Install frontend dependencies
         working-directory: hotline-tauri
@@ -247,19 +321,27 @@ jobs:
             -validity 10000 -storepass hotline123 -keypass hotline123 \
             -dname "CN=Hotline Navigator,O=Greg Gant,C=US"
 
-      - name: Add NDK toolchain to PATH
-        run: echo "/Users/greg/Library/Android/sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/darwin-x86_64/bin" >> $GITHUB_PATH
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      - name: Clean stale Android build artifacts
-        run: rm -rf hotline-tauri/src-tauri/target/*-linux-android*/release/build/openssl-sys-*/out/openssl-build/build/src
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android build tools
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
       - name: Build Android APK
         working-directory: hotline-tauri
-        env:
-          ANDROID_HOME: /Users/greg/Library/Android/sdk
-          NDK_HOME: /Users/greg/Library/Android/sdk/ndk/30.0.14904198
-          JAVA_HOME: /opt/homebrew/Cellar/openjdk@17/17.0.18/libexec/openjdk.jdk/Contents/Home
-        run: npx tauri android build
+        run: npx tauri android build --ci --apk true --aab false
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4

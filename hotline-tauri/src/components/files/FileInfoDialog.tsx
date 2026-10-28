@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useState, useEffect } from 'react';
 import { useAppStore } from '../../stores/appStore';
+import { formatHotlineDate } from '../../utils/formatHotlineDate';
 
 interface FileInfoDialogProps {
   serverId: string;
@@ -72,8 +73,8 @@ export default function FileInfoDialog({ serverId, fileName, fileSize, fileType,
     rows.push({ label: 'Size', value: `${formatBytes(details?.file_size ?? fileSize)} (${(details?.file_size ?? fileSize).toLocaleString()} bytes)` });
   }
 
-  if (details?.create_date) rows.push({ label: 'Created', value: details.create_date });
-  if (details?.modify_date) rows.push({ label: 'Modified', value: details.modify_date });
+  if (details?.create_date) rows.push({ label: 'Created', value: formatHotlineDate(details.create_date) });
+  if (details?.modify_date) rows.push({ label: 'Modified', value: formatHotlineDate(details.modify_date) });
   if (details?.comment) rows.push({ label: 'Comment', value: details.comment });
   if (infoError) rows.push({ label: 'Details', value: 'Server details unavailable' });
   if (creator) {

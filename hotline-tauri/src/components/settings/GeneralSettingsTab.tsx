@@ -627,7 +627,9 @@ export default function GeneralSettingsTab() {
               setInlineMediaEnabled(enabled);
               try {
                 await invoke('set_inline_media_enabled', { enabled });
-              } catch {}
+              } catch (error) {
+                console.error('Failed to update inline media preference', error);
+              }
             }}
             className="ml-4 toggle toggle-primary"
           />

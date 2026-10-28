@@ -49,6 +49,27 @@ This is a **Tauri-based Hotline client** that provides a modern, cross-platform 
 
 For more details about the Tauri client implementation, see the [`hotline-tauri/README.md`](hotline-tauri/README.md).
 
+## Automated builds
+
+All release builds run on GitHub-hosted Actions runners; no personal machines,
+SSH hosts, or self-hosted runners are required. Run these workflows manually
+from the Actions tab, or push a `v*` tag:
+
+- **Build macOS, iOS and Android**: macOS universal DMG (signed and notarized),
+  unsigned iOS IPA, and Android APK. The historical `build-self-hosted.yml`
+  filename is retained so existing workflow dispatch links continue to work.
+- **Build Windows**: x64 NSIS installer.
+- **Build Linux (Cloud)**: x64 and ARM64 Debian packages and AppImages.
+
+Manual runs upload downloadable workflow artifacts. Apple desktop signing uses
+repository secrets `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`.
+The unsigned iOS artifact requires signing when sideloaded. Android currently
+uses a temporary signing key per build, so upgrading between builds may require
+uninstalling the previous APK; a persistent release key is needed for seamless
+updates. Tagged Apple/Android/Windows runs upload to a draft release; the Linux
+workflow attaches packages to an existing release.
+
 ## Sideloading on Mobile
 
 ### iOS/iPadOS

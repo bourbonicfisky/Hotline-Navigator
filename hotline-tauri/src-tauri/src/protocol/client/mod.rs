@@ -2570,6 +2570,64 @@ mod encoding_tests {
     }
 
     #[tokio::test]
+    async fn legacy_login_sends_exact_password_bytes_over_tcp() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Reported failing cases: multiple characters, one character, and blank.
+        // Validate the raw wire fields independently of Transaction::decode.
+        for (password, encoded) in [
+            ("admin", vec![0x9e, 0x9b, 0x92, 0x96, 0x91]),
+            ("a", vec![0x9e]),
+            ("", vec![]),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut handshake = [0; 12];
+                stream.read_exact(&mut handshake).await.unwrap();
+                assert_eq!(&handshake[..8], b"TRTPHOTL");
+                stream.write_all(b"TRTP\0\0\0\0").await.unwrap();
+                let mut header = [0; 20];
+                stream.read_exact(&mut header).await.unwrap();
+                assert_eq!(&header[2..4], &107u16.to_be_bytes()); // Login transaction
+                assert_eq!(&header[12..16], &header[16..20]);
+                let size = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
+                assert!(size < 1024);
+                let mut body = vec![0; size];
+                stream.read_exact(&mut body).await.unwrap();
+                let count = u16::from_be_bytes(body[..2].try_into().unwrap());
+                let mut offset = 2;
+                let mut credentials = std::collections::HashMap::new();
+                for _ in 0..count {
+                    let field = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap());
+                    let length = u16::from_be_bytes(body[offset + 2..offset + 4].try_into().unwrap()) as usize;
+                    offset += 4;
+                    if field == 105 || field == 106 {
+                        assert!(credentials.insert(field, body[offset..offset + length].to_vec()).is_none());
+                    }
+                    offset += length;
+                }
+                assert_eq!(offset, body.len(), "no trailing padding or null bytes");
+                assert_eq!(credentials.get(&105).unwrap(), &[0x9e, 0x9b, 0x92, 0x96, 0x91]);
+                assert_eq!(credentials.get(&106).unwrap(), &encoded);
+                let mut reply = Transaction::new(u32::from_be_bytes(header[4..8].try_into().unwrap()), TransactionType::Login);
+                reply.is_reply = 1;
+                stream.write_all(&reply.encode()).await.unwrap();
+            });
+            let bookmark = serde_json::from_value(serde_json::json!({
+                "id": "password-test", "name": "test", "address": "127.0.0.1", "port": port,
+                "login": "admin", "password": password
+            })).unwrap();
+            let client = HotlineClient::new(bookmark, false);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                client.establish_connection().await.unwrap();
+                client.login().await.unwrap();
+                server.await.unwrap();
+            }).await.expect("login timed out");
+        }
+    }
+
+    #[tokio::test]
     async fn login_resolves_encoding_before_decoding_reply_text() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         for encoding in [TextEncoding::Utf8, TextEncoding::Macintosh] {
