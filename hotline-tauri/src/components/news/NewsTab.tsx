@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import MarkdownText from '../common/MarkdownText';
+import { formatHotlineDate } from '../../utils/formatHotlineDate';
 
 interface NewsCategory {
   type: number;
@@ -271,7 +272,7 @@ export default function NewsTab({
                       by {article.poster}
                       {article.date && (
                         <span className="ml-2 text-gray-500 dark:text-gray-500">
-                          • {article.date}
+                          • {formatHotlineDate(article.date)}
                         </span>
                       )}
                     </div>
@@ -374,7 +375,7 @@ export default function NewsTab({
                     by {selectedArticle.poster}
                     {selectedArticle.date && (
                       <span className="ml-2 text-gray-500 dark:text-gray-500">
-                        • {selectedArticle.date}
+                        • {formatHotlineDate(selectedArticle.date)}
                       </span>
                     )}
                   </div>

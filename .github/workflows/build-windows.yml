@@ -40,8 +40,25 @@ jobs:
         run: npm ci
 
       - name: Build Windows (NSIS installer)
+        # Includes the production TypeScript check through beforeBuildCommand.
         working-directory: hotline-tauri
         run: npx tauri build --bundles nsis
+
+      - name: Test frontend
+        working-directory: hotline-tauri
+        run: npm test -- --silent
+
+      - name: Test login, dates, and streaming downloads on Windows
+        working-directory: hotline-tauri/src-tauri
+        run: |
+          cargo test --locked --lib protocol::client::transfer_io
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --lib legacy_login_sends_exact_password_bytes_over_tcp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --lib bookmark_flags_survive_ipc_and_legacy_disk_roundtrips
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --lib protocol::dates
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4

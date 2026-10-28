@@ -19,11 +19,11 @@ pub struct Bookmark {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// True when a password is stored in the secure vault.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, rename = "hasPassword", alias = "has_password", skip_serializing_if = "std::ops::Not::not")]
     pub has_password: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<u16>,
-    #[serde(default)]
+    #[serde(default, rename = "autoConnect", alias = "auto_connect")]
     pub auto_connect: bool,
     #[serde(default)]
     pub tls: bool,
@@ -154,6 +154,27 @@ pub fn encode_text(text: &str, encoding: TextEncoding) -> Vec<u8> {
 #[cfg(test)]
 mod text_encoding_tests {
     use super::*;
+
+    #[test]
+    fn bookmark_flags_survive_ipc_and_legacy_disk_roundtrips() {
+        for (password_key, auto_key) in [("hasPassword", "autoConnect"), ("has_password", "auto_connect")] {
+            let mut input = serde_json::json!({
+                "id": "saved", "name": "Server", "address": "localhost", "port": 5500, "login": "admin"
+            });
+            input[password_key] = true.into();
+            input[auto_key] = true.into();
+            let bookmark: Bookmark = serde_json::from_value(input).unwrap();
+            assert!(bookmark.has_password);
+            assert!(bookmark.auto_connect);
+            let saved = serde_json::to_value(&bookmark).unwrap();
+            assert_eq!(saved["hasPassword"], true);
+            assert_eq!(saved["autoConnect"], true);
+            assert!(saved.get("has_password").is_none());
+            assert!(saved.get("password").is_none());
+            let loaded: Bookmark = serde_json::from_value(saved).unwrap();
+            assert!(loaded.has_password && loaded.auto_connect);
+        }
+    }
 
     #[test]
     fn conversion_uses_session_encoding_without_guessing() {

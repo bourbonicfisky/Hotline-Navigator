@@ -25,7 +25,10 @@ async fn copy_bytes<W: AsyncWrite + Unpin, F: FnMut(u64)>(
     reader: &mut TransferReader, output: &mut W, count: u64, progress: &mut F,
 ) -> Result<(), String> {
     let mut remaining = count;
-    let mut buffer = [0; 65536];
+    // This buffer lives across awaits and is embedded in every caller's future.
+    // Keep it on the heap to avoid exhausting small Windows thread stacks when
+    // Tauri constructs and polls the nested download command.
+    let mut buffer = vec![0u8; 65536];
     while remaining > 0 {
         let n = remaining.min(buffer.len() as u64) as usize;
         // read() preserves even a short final chunk when the connection drops.
@@ -110,6 +113,14 @@ pub(super) async fn receive_file<W: AsyncWrite + Unpin, F: FnMut(u64)>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn download_future_fits_small_thread_stacks() {
+        let mut reader = TransferReader::Plain(Box::new(std::io::Cursor::new(Vec::<u8>::new())));
+        let mut output = Vec::new();
+        let future = receive_file(&mut reader, &mut output, false, Some(0), true, None, |_| {});
+        let size = std::mem::size_of_val(&future);
+        assert!(size < 16 * 1024, "download future occupies {size} bytes before its callers are included");
+    }
     fn filp(data: &[u8], declared: u32) -> Vec<u8> {
         let mut result = b"FILP\0\x01".to_vec();
         result.extend_from_slice(&[0; 16]);
@@ -122,7 +133,7 @@ mod tests {
     }
     #[tokio::test]
     async fn empty_and_short_files_are_exact() {
-        for bytes in [vec![], vec![1], vec![1, 2, 3], vec![1; 100]] {
+        for bytes in [vec![], vec![1], vec![1, 2, 3], vec![1; 100], vec![42; 150_000]] {
             for raw in [false, true] {
                 let wire = if raw { bytes.clone() } else { filp(&bytes, bytes.len() as u32) };
                 let mut reader = TransferReader::Plain(Box::new(std::io::Cursor::new(wire)));

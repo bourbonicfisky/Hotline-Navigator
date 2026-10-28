@@ -8,7 +8,8 @@ import ConnectDialog from './ConnectDialog';
 import SettingsView from '../settings/SettingsView';
 import NotificationLog from '../notifications/NotificationLog';
 import SearchFeaturePrompt from './SearchFeaturePrompt';
-import { getPassword, savePassword } from '../../utils/passwordVault';
+import { savePassword } from '../../utils/passwordVault';
+import { withBookmarkPassword } from '../../utils/bookmarkCredentials';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import type { Bookmark } from '../../types';
 
@@ -90,11 +91,7 @@ export default function TrackerWindow() {
         try {
           console.log(`Auto-connecting to ${bookmark.name}...`);
           // Load password from secure vault
-          const connectBookmark = { ...bookmark };
-          if (bookmark.hasPassword) {
-            const vaultPassword = await getPassword(bookmark.id);
-            if (vaultPassword) connectBookmark.password = vaultPassword;
-          }
+          const connectBookmark = await withBookmarkPassword(bookmark);
           const result = await invoke<{ serverId: string; tls: boolean; port: number }>('connect_to_server', {
             bookmark: connectBookmark,
             username,

@@ -1,4 +1,5 @@
 import { getPassword } from '../../../utils/passwordVault';
+import { withBookmarkPassword } from '../../../utils/bookmarkCredentials';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { usePreferencesStore } from '../../../stores/preferencesStore';
@@ -128,7 +129,7 @@ export function useAutoReconnect({
 
     try {
       await invoke('connect_to_server', {
-        bookmark,
+        bookmark: await withBookmarkPassword(bookmark),
         username,
         userIconId,
         autoDetectTls,
