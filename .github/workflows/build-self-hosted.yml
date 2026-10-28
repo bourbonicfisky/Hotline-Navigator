@@ -5,9 +5,19 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build
+        type: choice
+        default: all
+        options:
+          - all
+          - macos
+          - ios
+          - android
 
 concurrency:
-  group: hosted-${{ github.workflow }}-${{ github.ref }}
+  group: hosted-${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform || 'all' }}
   cancel-in-progress: true
 
 permissions:
@@ -67,6 +77,7 @@ jobs:
 
   # ─── macOS Universal Binary ────────────────────────────────────────
   build-macos:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'macos'
     needs: check
     runs-on: macos-15
     timeout-minutes: 90
@@ -169,6 +180,7 @@ jobs:
 
   # ─── iOS / iPadOS (Unsigned) ───────────────────────────────────────
   build-ios:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'ios'
     needs: check
     runs-on: macos-15
     timeout-minutes: 90
@@ -264,6 +276,7 @@ jobs:
 
   # ─── Android (unsigned APK for sideloading) ────────────────────────
   build-android:
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'android'
     needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -316,6 +329,9 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
 
       - name: Install Android build tools
         run: |
