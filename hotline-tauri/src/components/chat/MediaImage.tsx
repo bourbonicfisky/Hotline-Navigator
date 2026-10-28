@@ -55,7 +55,9 @@ export default function MediaImage({
   const [failureReason, setFailureReason] = useState(media.failureReason);
   const [dimensions, setDimensions] = useState({ width: media.width, height: media.height });
   const callbacks = useRef({ onLoaded, onFailed });
-  callbacks.current = { onLoaded, onFailed };
+  useEffect(() => {
+    callbacks.current = { onLoaded, onFailed };
+  }, [onLoaded, onFailed]);
   useEffect(() => {
     let cancelled = false;
     let ownedUrl: string | undefined;

@@ -14,10 +14,10 @@ interface UserIconProps {
 export default function UserIcon({ iconId, serverId, userId, size = 16, className = '' }: UserIconProps) {
   const avatar = useAvatarStore(state => serverId && userId !== undefined ? state.icons[serverId]?.[userId] : undefined);
   const [avatarError, setAvatarError] = useState(false);
-  useEffect(() => { setAvatarError(false); setLocalError(false); setRemoteError(false); setIsBanner(false); }, [iconId, avatar]);
   const [localError, setLocalError] = useState(false);
   const [remoteError, setRemoteError] = useState(false);
   const [isBanner, setIsBanner] = useState(false);
+  useEffect(() => { setAvatarError(false); setLocalError(false); setRemoteError(false); setIsBanner(false); }, [iconId, avatar]);
   const useRemoteIcons = usePreferencesStore((s) => s.useRemoteIcons);
 
   if (isIconBlocked(iconId)) {
